@@ -96,9 +96,12 @@ def visualize_cameras(colored_camera_dicts, sphere_radius, camera_size=0.1, geom
 
 
 if __name__ == "__main__":
-    parser = io_util.create_args_parser()
-    parser.add_argument("--scan_id", type=int, default=40)
-    parser.add_argument("--mesh_file", type=str, default=None)
+    # parser = io_util.create_args_parser()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='../config_test/neus_nomask.yaml', help='Path to config file.')
+    parser.add_argument('--resume_dir', type=str, default=None, help='Directory of experiment to load.')
+    parser.add_argument("--mesh_file", type=str, default="../logs/neusseg_nomask_jungwoo_exp_b_7/meshes/00300000.ply")
     parser.add_argument("--sphere_radius", type=float, default=3.0)
     parser.add_argument("--backface",action='store_true', help='render show back face')
     args = parser.parse_args()

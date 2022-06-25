@@ -3,7 +3,7 @@ import torch
 import random
 import numpy as np
 from typing import Optional
-
+import datetime
 import torch.distributed as dist
 
 rank = 0        # process id, for IPC
@@ -19,7 +19,7 @@ def init_env(args):
             slurm_initialize('nccl', port=args.port)
         else:
             #--------- for torch.distributed.launch
-            dist.init_process_group(backend='nccl')
+            dist.init_process_group(backend='nccl', timeout=datetime.timedelta(seconds=3600)) #To get longer timeout 1hour
 
         rank = int(os.environ['RANK'])
         local_rank = int(os.environ['LOCAL_RANK'])

@@ -1,4 +1,5 @@
 from utils.print_fn import log
+from dataio.colormap import CIHP20, NULB_CMAP
 
 import os
 import copy
@@ -14,6 +15,7 @@ import numpy as np
 
 import torch
 import skimage
+import cv2
 from skimage.transform import rescale
 
 def glob_imgs(path):
@@ -21,6 +23,21 @@ def glob_imgs(path):
     for ext in ['*.png', '*.jpg', '*.JPEG', '*.JPG']:
         imgs.extend(glob.glob(os.path.join(path, ext)))
     return imgs
+
+def get_img_paths(path, exclude=[]):
+    all_ims = []
+    names = sorted(os.listdir(path))
+    for c_idx, name in enumerate(names):
+        if c_idx + 1 in exclude:
+            continue
+        image_root = os.path.join(path, name)
+        ims = glob_imgs(image_root)
+        ims = np.array(sorted(ims))
+        all_ims.append(ims)
+    num_img = min([len(ims) for ims in all_ims])
+    all_ims = [ims[:num_img] for ims in all_ims]
+    all_ims = np.stack(all_ims, axis=1)
+    return all_ims.tolist()
 
 # def find_files(dir, exts=['*.png', '*.jpg']):
 #     if os.path.isdir(dir):
@@ -34,11 +51,12 @@ def glob_imgs(path):
 #     else:
 #         return []
 
-def load_rgb(path, downscale=1):
+def load_rgb(path, downscale=1, anti_aliasing=True, order=1):
     img = imageio.imread(path)
     img = skimage.img_as_float32(img)
     if downscale != 1:
-        img = rescale(img, 1./downscale, anti_aliasing=False, multichannel=True)
+        # 0 nearest, 1 bilinear
+        img = rescale(img, 1./downscale, order=order, anti_aliasing=anti_aliasing, channel_axis=-1) # RGB image
 
     # NOTE: pixel values between [-1,1]
     # img -= 0.5
@@ -46,14 +64,29 @@ def load_rgb(path, downscale=1):
     img = img.transpose(2, 0, 1)
     return img
 
-def load_mask(path, downscale=1):
-    alpha = imageio.imread(path, as_gray=True)
-    alpha = skimage.img_as_float32(alpha)
+def load_mask(path, downscale=1, isbinary=True):
+    # alpha = imageio.imread(path, as_gray=True)
+    alpha = imageio.imread(path)
+    # semantics = None
+    # if semantictype=='CIHP':
+    #     semantics = np.zeros(alpha.shape[:-1], dtype=np.int)
+    #     labels_color = np.unique(alpha.reshape(-1, alpha.shape[-1]), axis=0)
+    #     labels = np.zeros((labels_color.shape[0], ), dtype=np.int)
+    #     for k, v in NULB_CMAP.items():
+    #         for id in v:
+    #             labels[np.all(labels_color == CIHP20[id][::-1], axis=-1)] = k
+    #             # semantics[np.all(alpha == CIHP20[id][::-1], axis=2)] = k
+    #     for label, label_color in zip(labels, labels_color):
+    #         semantics[np.all(alpha == label_color, axis=-1)] = label
+    # alpha = skimage.img_as_float32(alpha)
+    alpha = alpha.mean(axis=-1) if not isbinary and len(alpha.shape)>2 else alpha #todo check
+    alpha = skimage.color.rgb2gray(alpha).astype(np.float32) if isbinary else alpha.astype(np.int)
     if downscale != 1:
-        alpha = rescale(alpha, 1./downscale, anti_aliasing=False, multichannel=False)
-    object_mask = alpha > 127.5
+        alpha = rescale(alpha, 1./downscale, order=0, anti_aliasing=False, channel_axis=None) # Grayscale
+    object_mask = alpha > .0 if isbinary else alpha
 
-    return object_mask
+
+    return object_mask #, semantics
 
 def partialclass(cls, *args, **kwds):
     class NewCls(cls):
@@ -75,7 +108,7 @@ def backup(backup_dir):
     log.info("=> Backing up... ")
     special_files_to_copy = []
     filetypes_to_copy = [".py"]
-    subdirs_to_copy = ["", "dataio/", "models/", "tools/", "debug_tools/", "utils/"]
+    subdirs_to_copy = ["", "dataio/", "models/", "tools/", "debug_tools/", "utils/", "models/frameworks/", "models/layers/"]
 
     this_dir = "./" # TODO
     cond_mkdir(backup_dir)
@@ -338,3 +371,137 @@ def load_config(args, unknown, base_config_path=None):
         print("=> Use cuda devices: {}".format(config.device_ids))
 
     return config
+
+def center_resize_info(image, out_shape):
+    # out = np.zeros(out_shape, dtype=image.dtype)
+
+    scaleW = out_shape[1]/image.shape[1] if (out_shape[1] < image.shape[1]) else 1
+    scaleH = out_shape[0]/image.shape[0] if (out_shape[0] < image.shape[0]) else 1
+
+    ty, tx = np.array(out_shape[:2])/2. - np.array(image.shape[:2])/2.
+    # image_ = cv2.resize(image.copy(), dsize=None, fx=scaleW, fy=scaleH, interpolation=cv2.INTER_LINEAR) if (scaleH != 1.0) or (scaleW != 1.0) else image.copy()
+
+    txs = tx/scaleW
+    tys = ty/scaleH
+    txf = np.floor(txs).astype(np.int64)
+    tyf = np.floor(tys).astype(np.int64)
+
+    # out[tyf:(tyf+image_.shape[0]), txf:(txf+image_.shape[1]),...] = image_
+
+    return scaleW, scaleH, txf, tyf
+
+def read_obj(file_name):
+    vertices = []
+    faces = []
+    face_textures = []
+    textures = []
+    try:
+        f = open(file_name)
+        for line in f:
+            if line[:2] == "v ":
+                v = line.split()[1:]
+                vertices.append(tuple([float(vert) for vert in v]))
+
+            elif line[0] == "f":
+                string = line.replace("//", "/")
+                ##
+                each_vertex = string.split()[1:]
+                face, tface, ff, ft = [], [], [], []
+                for item in each_vertex:
+                    if '/' in item:
+                        items = item.split('/')
+                        face.append(items[0])
+                        tface.append(items[1])
+                        ##
+                        for v, vt in zip(face, tface):
+                            v, vt = int(v), int(vt)
+                            ff.append(v)
+                            ft.append(vt)
+                    else:
+                        face.append(item)
+                ##
+                faces.append(tuple([int(v) for v in face]))
+                if len(tface) > 1:
+                    face_textures.append(tuple([int(v) for v in tface]))
+            elif line[:2] == 'vt':
+                vt = line.split()[1:]
+                textures.append(tuple([float(t) for t in vt]))
+        f.close()
+    except IOError:
+        print(".obj file not found.")
+
+    return {'v' : np.array(vertices, dtype=np.float32),
+            'f' : np.array(faces, dtype=np.int64) - 1,
+            'vt' : np.array(textures, dtype=np.float32),
+            'ft' : np.array(face_textures, dtype=np.int64) - 1}
+
+# Undistort image (fromm kornia) with specifying interpolation method
+# Based on https://github.com/opencv/opencv/blob/master/modules/calib3d/src/undistort.dispatch.cpp#L287
+from kornia.utils import create_meshgrid
+from kornia.geometry.linalg import transform_points
+from kornia.geometry.transform import remap
+from kornia.geometry.calibration import distort_points
+
+def undistort_image(image: torch.Tensor, K: torch.Tensor, dist: torch.Tensor, mode: str='bilinear') -> torch.Tensor:
+    r"""Compensate an image for lens distortion.
+
+    Radial :math:`(k_1, k_2, k_3, k_4, k_4, k_6)`,
+    tangential :math:`(p_1, p_2)`, thin prism :math:`(s_1, s_2, s_3, s_4)`, and tilt :math:`(\tau_x, \tau_y)`
+    distortion models are considered in this function.
+
+    Args:
+        image: Input image with shape :math:`(*, C, H, W)`.
+        K: Intrinsic camera matrix with shape :math:`(*, 3, 3)`.
+        dist: Distortion coefficients
+            :math:`(k_1,k_2,p_1,p_2[,k_3[,k_4,k_5,k_6[,s_1,s_2,s_3,s_4[,\tau_x,\tau_y]]]])`. This is
+            a vector with 4, 5, 8, 12 or 14 elements with shape :math:`(*, n)`.
+
+    Returns:
+        Undistorted image with shape :math:`(*, C, H, W)`.
+
+    Example:
+        >>> img = torch.rand(1, 3, 5, 5)
+        >>> K = torch.eye(3)[None]
+        >>> dist_coeff = torch.rand(1, 4)
+        >>> out = undistort_image(img, K, dist_coeff)
+        >>> out.shape
+        torch.Size([1, 3, 5, 5])
+
+    """
+    if len(image.shape) < 3:
+        raise ValueError(f"Image shape is invalid. Got: {image.shape}.")
+
+    if K.shape[-2:] != (3, 3):
+        raise ValueError(f'K matrix shape is invalid. Got {K.shape}.')
+
+    if dist.shape[-1] not in [4, 5, 8, 12, 14]:
+        raise ValueError(f'Invalid number of distortion coefficients. Got {dist.shape[-1]}.')
+
+    if not image.is_floating_point():
+        raise ValueError(f'Invalid input image data type. Input should be float. Got {image.dtype}.')
+
+    if image.shape[:-3] != K.shape[:-2] or image.shape[:-3] != dist.shape[:-1]:
+        # Input with image shape (1, C, H, W), K shape (3, 3), dist shape (4)
+        # allowed to avoid a breaking change.
+        if not all((image.shape[:-3] == (1,), K.shape[:-2] == (), dist.shape[:-1] == ())):
+            raise ValueError(
+                f'Input shape is invalid. Input batch dimensions should match. '
+                f'Got {image.shape[:-3]}, {K.shape[:-2]}, {dist.shape[:-1]}.'
+            )
+
+    channels, rows, cols = image.shape[-3:]
+    B = image.numel() // (channels * rows * cols)
+
+    # Create point coordinates for each pixel of the image
+    xy_grid: torch.Tensor = create_meshgrid(rows, cols, False, image.device, image.dtype)
+    pts = xy_grid.reshape(-1, 2)  # (rows*cols)x2 matrix of pixel coordinates
+
+    # Distort points and define maps
+    ptsd: torch.Tensor = distort_points(pts, K, dist)  # Bx(rows*cols)x2
+    mapx: torch.Tensor = ptsd[..., 0].reshape(B, rows, cols)  # B x rows x cols, float
+    mapy: torch.Tensor = ptsd[..., 1].reshape(B, rows, cols)  # B x rows x cols, float
+
+    # Remap image to undistort
+    out = remap(image.reshape(B, channels, rows, cols), mapx, mapy, mode=mode, align_corners=True)
+
+    return out.view_as(image)

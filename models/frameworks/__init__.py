@@ -5,6 +5,12 @@ def get_model(args):
         from .neus import get_model
     elif args.model.framework == 'VolSDF':
         from .volsdf import get_model
+    elif args.model.framework == 'nerfpp':
+        from .nerfpp import get_model
+    elif args.model.framework == 'NeuSSegm':
+        from .neussegm import get_model
+    elif args.model.framework == 'GarmentNerf':
+        from .garmnerf import get_model
     else:
         raise NotImplementedError
     return get_model(args)

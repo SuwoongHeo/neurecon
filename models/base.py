@@ -1,9 +1,11 @@
 from utils.print_fn import log
 from utils.logger import Logger
 
+import functools
 import math
 import numbers
 import numpy as np
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -82,12 +84,21 @@ def get_embedder(multires, input_dim=3):
 
 
 class Sine(nn.Module):
-    def __init__(self, w0):
+    def __init__(self, w0, FiLMLayer=False):
         super().__init__()
         self.w0 = w0
 
+        #inspired by pi-GAN below,
+        # NOTE(from swheo) : pi-GAN used mapping network to get scale(frequency),shift from mapping network having input latent z
+        # https://github.com/marcoamonteiro/pi-GAN/
+        self.FiLMLayer = FiLMLayer
+        if FiLMLayer:
+            self.scale = nn.Parameter(data=torch.Tensor([1.]), requires_grad=True)
+            self.shift = nn.Parameter(data=torch.Tensor([0.]), requires_grad=True)
+
     def forward(self, x):
-        return torch.sin(self.w0 * x)
+        #todo Filmed siren as,
+        return torch.sin(self.scale*self.w0*x + self.shift) if self.FiLMLayer else torch.sin(self.w0 * x)
 
 
 class SirenLayer(nn.Linear):
@@ -103,6 +114,7 @@ class SirenLayer(nn.Linear):
     def reset_parameters(self) -> None:
         # NOTE: in offical SIREN, first run linear's original initialization, then run custom SIREN init.
         #       hence the bias is initalized in super()'s reset_parameters()
+        # Swheo; Checked, same as original weights
         super().reset_parameters()
         with torch.no_grad():
             dim = self.input_dim
@@ -116,31 +128,114 @@ class SirenLayer(nn.Linear):
 
 
 class DenseLayer(nn.Linear):
-    def __init__(self, input_dim: int, out_dim: int, *args, activation=None, **kwargs):
+    def __init__(self, input_dim: int, out_dim: int, *args, activation=nn.ReLU(inplace=True), **kwargs):
         super().__init__(input_dim, out_dim, *args, **kwargs)
-        if activation is None:
-            self.activation = nn.ReLU(inplace=True)
-        else:
-            self.activation = activation
+        self.activation = activation
 
     def forward(self, x):
         out = super().forward(x)
-        out = self.activation(out)
+        if self.activation is not None:
+            out = self.activation(out)
         return out
 
+class MLPNet(nn.Module):
+    def __init__(self, in_dim, out_dim,
+                D = 4, W = 256, skips = [], W_up = [],
+                featcats=[], featdim=0,
+                activation_intmed = None,
+                activation_output = None,
+                weight_init = None,
+                weight_norm = True,
+                use_siren = False):
+        super().__init__()
+        self.input_dim = in_dim
+        self.out_dim = out_dim
+        self.D = D
+        self.W = W
+        self.skips = np.array(skips)
+        self.W_up = np.array(W_up)
+        self.featcats = np.array(featcats)
+
+        outdims = np.array([W] * (D + 1))
+        outdims[D] = out_dim
+
+        indims = np.array([W] * (D + 1))
+        indims[0] = in_dim
+
+        if len(W_up) > 0:
+            outdims[self.W_up] = outdims[self.W_up] * 2
+            indims[self.W_up - 1] = indims[self.W_up - 1] * 2
+
+        if len(skips) > 0:
+            indims[self.skips] = indims[self.skips] + in_dim # or # W
+            outdims[self.skips - 1] = indims[self.skips-1] # or # W - in_dim
+
+        if len(featcats) > 0 and featdim != 0:
+            indims[self.featcats] = indims[self.featcats] + featdim
+
+        # NOTE: as in IDR/NeuS, the network's has D+1 layers
+        layers = []
+        for l in range(D + 1):
+            if l != D:
+                layer = SirenLayer(indims[l], outdims[l], is_first=(l == 0)) if use_siren \
+                    else DenseLayer(indims[l], outdims[l], activation=activation_intmed)
+            else:
+                layer = DenseLayer(indims[l], outdims[l], activation=activation_output)
+
+            if weight_norm and weight_init is None:
+                layer = nn.utils.weight_norm(layer)
+
+            layers.append(layer)
+
+        if weight_init is not None:
+            weight_init(layers)
+            if weight_norm:
+                layers = [nn.utils.weight_norm(layer_) for layer_ in layers]
+
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x, infeat=None):
+        h = x
+        for i in range(self.D):
+            if i in self.skips:
+                h = torch.cat([h, x], dim=-1) / np.sqrt(2)
+            if i in self.featcats and infeat is not None:
+                h = torch.cat([h, infeat], dim=-1) / np.sqrt(2)
+
+            h = self.layers[i](h)
+
+        out = self.layers[-1](h)
+
+        return out
+
+def weight_init_SAL(layers, skips, radius_init, embed_multires):
+    D = len(layers) - 1
+    input_ch = layers[0].in_features
+    for l, m in enumerate(layers):
+        # --------------
+        # sphere init, as in SAL / IDR.
+        # --------------
+        if l == D:
+            nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(m.in_features), std=0.0001)
+            nn.init.constant_(m.bias, -radius_init)
+        elif embed_multires > 0 and l == 0:
+            torch.nn.init.constant_(m.bias, 0.0)
+            torch.nn.init.constant_(m.weight[:, 3:], 0.0)  # let the initial weights for octaves to be 0.
+            torch.nn.init.normal_(m.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+        elif embed_multires > 0 and l in skips:
+            torch.nn.init.constant_(m.bias, 0.0)
+            torch.nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+            torch.nn.init.constant_(m.weight[:, -(input_ch - 3):],
+                                    0.0)  # NOTE: this contrains the concat order to be  [h, x_embed]
+        else:
+            nn.init.constant_(m.bias, 0.0)
+            nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+
+#Todo rename this shitty name
 class ImplicitSurface(nn.Module):
     def __init__(self,
-                 W=256,
-                 D=8,
-                 skips=[4],
-                 W_geo_feat=256,
-                 input_ch=3,
-                 radius_init=1.0,
-                 obj_bounding_size=2.0,
-                 geometric_init=True,
-                 embed_multires=6,
-                 weight_norm=True,
-                 use_siren=False,
+                 W=256, D=8, W_geo_feat=256, input_dim=3, input_feat=0,  output_dim=1, radius_init=1.0, obj_bounding_size=2.0, embed_multires=6,
+                 skips=[4], featcats=[], W_up=[], geometric_init=True, weight_norm=True, use_siren=False
                  ):
         """
         W_geo_feat: to set whether to use nerf-like geometry feature or IDR-like geometry feature.
@@ -148,88 +243,34 @@ class ImplicitSurface(nn.Module):
             set to >0: IDR-like ,the output feature is the last part of the geometry network's output.
         """
         super().__init__()
-        # occ_net_list = [
-        #     nn.Sequential(
-        #         nn.Linear(input_ch, W),
-        #         nn.Softplus(),
-        #     )
-        # ] + [
-        #     nn.Sequential(
-        #         nn.Linear(W, W),
-        #         nn.Softplus()
-        #     ) for _ in range(D-2)
-        # ] + [
-        #     nn.Linear(W, 1)
-        # ]
         self.radius_init = radius_init
         self.register_buffer('obj_bounding_size', torch.tensor([obj_bounding_size]).float())
         self.geometric_init = geometric_init
         self.D = D
         self.W = W
         self.W_geo_feat = W_geo_feat
+        self.output_dim = output_dim
         if use_siren:
-            assert len(skips) == 0, "do not use skips for siren"
+            # assert len(skips) == 0, "do not use skips for siren" #todo : get back if it is not working
             self.register_buffer('is_pretrained', torch.tensor([False], dtype=torch.bool))
         self.skips = skips
+        self.featcats = featcats
         self.use_siren = use_siren
-        self.embed_fn, input_ch = get_embedder(embed_multires)
+        self.embed_fn, input_ch = get_embedder(embed_multires, input_dim)
+        self.input_feat = input_feat
+        weight_init = functools.partial(weight_init_SAL, skips=skips, radius_init=radius_init,
+                                        embed_multires=embed_multires)
+        input_ch = input_ch + input_feat if len(featcats)==0 else input_ch
+        self.mlpnet = MLPNet(in_dim=input_ch, out_dim=self.output_dim + W_geo_feat if W_geo_feat > 0 else self.output_dim,
+                             D=D, W=W, skips=skips, W_up=W_up,
+                             featcats=featcats, featdim=self.input_feat,
+                             activation_intmed=nn.Softplus(beta=100),
+                             activation_output=None,
+                             weight_init=weight_init,
+                             weight_norm=weight_norm, use_siren=use_siren)
 
-        surface_fc_layers = []
-        # NOTE: as in IDR/NeuS, the network's has D+1 layers
-        for l in range(D+1):
-            # decide out_dim
-            if l == D:
-                if W_geo_feat > 0:
-                    out_dim = 1 + W_geo_feat
-                else:
-                    out_dim = 1
-            elif (l+1) in self.skips:
-                out_dim = W - input_ch  # recude output dim before the skips layers, as in IDR / NeuS
-            else:
-                out_dim = W
-                
-            # decide in_dim
-            if l == 0:
-                in_dim = input_ch
-            else:
-                in_dim = W
-            
-            if l != D:
-                if use_siren:
-                    layer = SirenLayer(in_dim, out_dim, is_first = (l==0))
-                else:
-                    # NOTE: beta=100 is important! Otherwise, the initial output would all be > 10, and there is not initial sphere.
-                    layer = DenseLayer(in_dim, out_dim, activation=nn.Softplus(beta=100))
-            else:
-                layer = nn.Linear(in_dim, out_dim)
 
-            # if true preform preform geometric initialization
-            if geometric_init and not use_siren:
-                #--------------
-                # sphere init, as in SAL / IDR.
-                #--------------
-                if l == D:
-                    nn.init.normal_(layer.weight, mean=np.sqrt(np.pi) / np.sqrt(in_dim), std=0.0001)
-                    nn.init.constant_(layer.bias, -radius_init) 
-                elif embed_multires > 0 and l == 0:
-                    torch.nn.init.constant_(layer.bias, 0.0)
-                    torch.nn.init.constant_(layer.weight[:, 3:], 0.0)   # let the initial weights for octaves to be 0.
-                    torch.nn.init.normal_(layer.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
-                elif embed_multires > 0 and l in self.skips:
-                    torch.nn.init.constant_(layer.bias, 0.0)
-                    torch.nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-                    torch.nn.init.constant_(layer.weight[:, -(input_ch - 3):], 0.0) # NOTE: this contrains the concat order to be  [h, x_embed]
-                else:
-                    nn.init.constant_(layer.bias, 0.0)
-                    nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-
-            if weight_norm:
-                layer = nn.utils.weight_norm(layer)
-
-            surface_fc_layers.append(layer)
-
-        self.surface_fc_layers = nn.ModuleList(surface_fc_layers)
-
+    # siren_sdf only for now...
     def pretrain_hook(self, configs={}):
         configs['target_radius'] = self.radius_init
         # TODO: more flexible, bbox-like scene bound.
@@ -241,27 +282,29 @@ class ImplicitSurface(nn.Module):
         return False
 
     def forward(self, x: torch.Tensor, return_h = False):
-        x = self.embed_fn(x)
-        
-        h = x
-        for i in range(self.D):
-            if i in self.skips:
-                # NOTE: concat order can not change! there are special operations taken in intialization.
-                h = torch.cat([h, x], dim=-1) / np.sqrt(2)
-            h = self.surface_fc_layers[i](h)
-        
-        out = self.surface_fc_layers[-1](h)
-        
+        feat = None
+        if self.input_feat>0:
+            if len(self.featcats)>0:
+                feat = x[..., :self.input_feat]
+                x = self.embed_fn(x[..., self.input_feat:])
+            else:
+                x = torch.cat([x[..., :self.input_feat], self.embed_fn(x[..., self.input_feat:])], dim=-1)
+        else:
+            x = self.embed_fn(x)
+
+        out = self.mlpnet(x, feat)
+
         if self.W_geo_feat > 0:
-            h = out[..., 1:]
-            out = out[..., :1].squeeze(-1)
+            h = out[..., self.output_dim:]
+            out = out[..., :self.output_dim].squeeze(-1)
         else:
             out = out.squeeze(-1)
         if return_h:
             return out, h
         else:
             return out
-    
+
+    # Computing local gradient (normal)
     def forward_with_nablas(self,  x: torch.Tensor, has_grad_bypass: bool = None):
         has_grad = torch.is_grad_enabled() if has_grad_bypass is None else has_grad_bypass
         # force enabling grad for normal calculation
@@ -298,10 +341,14 @@ def pretrain_siren_sdf(
         for it in tqdm(range(num_iters), desc="=> pretraining SIREN..."):
             pts = torch.empty([batch_points, 3]).uniform_(-obj_bounding_size, obj_bounding_size).float().to(device)
             sdf_gt = pts.norm(dim=-1) - target_radius
-            sdf_pred = implicit_surface.forward(pts)
-            
+            # sdf_pred = implicit_surface.forward(pts)
+            sdf_pred, nablas_pred, _ = implicit_surface.forward_with_nablas(pts)
+
             loss = F.l1_loss(sdf_pred, sdf_gt, reduction='mean')
-            
+            # [B, N_rays, N_pts]
+            nablas_norm = torch.norm(nablas_pred, dim=-1)
+            loss += 0.1 * F.mse_loss(nablas_norm, nablas_norm.new_ones(nablas_norm.shape), reduction='mean')
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -311,89 +358,71 @@ def pretrain_siren_sdf(
 
 class RadianceNet(nn.Module):
     def __init__(self,
-        D=4,
-        W=256,
-        skips=[],
-        W_geo_feat=256,
-        embed_multires=6,
-        embed_multires_view=4,
+        W=256, D=4, W_geo_feat=256, input_dim_pts=3, input_feat=0,
+        embed_multires=6, embed_multires_view=4, output_dim=3,
+        skips=[], featcats=[], W_up=[],
         use_view_dirs=True,
         weight_norm=True,
         use_siren=False,):
         super().__init__()
-        
-        input_ch_pts = 3
-        input_ch_views = 3
+
+        input_dim_views = 3
         if use_siren:
             assert len(skips) == 0, "do not use skips for siren"
+        self.input_feat = input_feat
+        self.featcats = featcats
         self.skips = skips
         self.D = D
         self.W = W
         self.use_view_dirs = use_view_dirs
-        self.embed_fn, input_ch_pts = get_embedder(embed_multires)
+        self.embed_fn, input_ch_pts = get_embedder(embed_multires, input_dim=input_dim_pts)
         if use_view_dirs:
-            self.embed_fn_view, input_ch_views = get_embedder(embed_multires_view)
-            in_dim_0 = input_ch_pts + input_ch_views + 3 + W_geo_feat
+            self.embed_fn_view, input_ch_views = get_embedder(embed_multires_view, input_dim=input_dim_views)
+            in_dim_0 = input_ch_pts + input_ch_views + 3 + W_geo_feat #3 for normal
         else:
             in_dim_0 = input_ch_pts + W_geo_feat
-        
-        fc_layers = []
-        # NOTE: as in IDR/NeuS, the network's has D+1 layers
-        for l in range(D + 1):
-            # decicde out_dim
-            if l == D:
-                out_dim = 3
-            else:
-                out_dim = W
-            
-            # decide in_dim
-            if l == 0:
-                in_dim = in_dim_0
-            elif l in self.skips:
-                in_dim = in_dim_0 + W
-            else:
-                in_dim = W
-            
-            if l != D:
-                if use_siren:
-                    layer = SirenLayer(in_dim, out_dim, is_first=(l==0))
-                else:
-                    layer = DenseLayer(in_dim, out_dim, activation=nn.ReLU(inplace=True))
-            else:
-                layer = DenseLayer(in_dim, out_dim, activation=nn.Sigmoid())
-            
-            if weight_norm:
-                layer = nn.utils.weight_norm(layer)
 
-            fc_layers.append(layer)
+        input_ch = in_dim_0 + input_feat if len(featcats)==0 else in_dim_0
+        self.mlpnet = MLPNet(in_dim=input_ch, out_dim=output_dim,
+                             D=D, W=W, skips=skips, W_up=W_up,
+                             featcats=featcats, featdim=input_feat,
+                             activation_intmed=nn.ReLU(inplace=True),
+                             activation_output=None if output_dim>3 else nn.Sigmoid(),
+                             weight_init=None,
+                             weight_norm=weight_norm, use_siren=use_siren)
 
-        self.layers = nn.ModuleList(fc_layers)
-    
     def forward(
         self, 
         x: torch.Tensor, 
         view_dirs: torch.Tensor, 
         normals: torch.Tensor, 
         geometry_feature: torch.Tensor):
+        feat = None
+        if self.input_feat>0:
+            if len(self.featcats)>0:
+                feat = x[..., :self.input_feat]
+                x = self.embed_fn(x[..., self.input_feat:])
+            else:
+                x[..., self.input_feat:] = self.embed_fn(x[..., self.input_feat:])
+        else:
+            x = self.embed_fn(x)
         # calculate radiance field
-        x = self.embed_fn(x)
         if self.use_view_dirs:
             view_dirs = self.embed_fn_view(view_dirs)
             radiance_input = torch.cat([x, view_dirs, normals, geometry_feature], dim=-1)
         else:
             radiance_input = torch.cat([x, geometry_feature], dim=-1)
-        
-        h = radiance_input
-        for i in range(self.D+1):
-            if i in self.skips:
-                h = torch.cat([h, radiance_input], dim=-1)
-            h = self.layers[i](h)
+
+        h = self.mlpnet(radiance_input, feat)
+
         return h
 
 
 # modified from https://github.com/yenchenlin/nerf-pytorch
+# swheo: modified using https://github.com/Harry-Zhi/semantic_nerf
 class NeRF(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_view=3, multires=-1, multires_view=-1, output_ch=4, skips=[4], use_view_dirs=False):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_view=3, multires=-1, multires_view=-1, output_ch=4, skips=[4], use_view_dirs=False,
+                 enable_semantic=False, num_semantic_classes=0):
         """
         """
         super(NeRF, self).__init__()
@@ -404,6 +433,7 @@ class NeRF(nn.Module):
 
         self.embed_fn, input_ch = get_embedder(multires, input_dim=input_ch)
         self.embed_fn_view, input_ch_view = get_embedder(multires_view, input_dim=input_ch_view)
+        self.enable_semantic=enable_semantic
 
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in
@@ -419,6 +449,11 @@ class NeRF(nn.Module):
         if use_view_dirs:
             self.feature_linear = nn.Linear(W, W)
             self.alpha_linear = nn.Linear(W, 1)
+            if enable_semantic:
+                self.semantic_linear = nn.Sequential(
+                    nn.Sequential(nn.Linear(W,W//2), nn.ReLU(W//2))
+                    , nn.Linear(W//2,num_semantic_classes)
+                )
             self.rgb_linear = nn.Linear(W // 2, 3)
         else:
             self.output_linear = nn.Linear(W, output_ch)
@@ -436,6 +471,8 @@ class NeRF(nn.Module):
 
         if self.use_view_dirs:
             sigma = self.alpha_linear(h)
+            if self.enable_semantic:
+                segm_logits = self.semantic_linear(h)
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], dim=-1)
 
@@ -446,12 +483,50 @@ class NeRF(nn.Module):
             rgb = self.rgb_linear(h)
         else:
             outputs = self.output_linear(h)
+            segm_logits = None
             rgb = outputs[..., :3]
             sigma = outputs[..., 3:]
-        
-        rgb = torch.sigmoid(rgb)
-        return sigma.squeeze(-1), rgb
 
+        rgb = torch.sigmoid(rgb)
+        return (sigma.squeeze(-1), rgb, segm_logits) if self.enable_semantic else (sigma.squeeze(-1), rgb)
+
+class NerfppNetwithAutoExpo(nn.Module):
+    def __init__(self,
+                 input_ch=3,
+                 optim_autoexpo=False,
+                 embed_multires = 10,
+                 embed_multires_view = 4,
+                 use_view_dirs = True,
+                 D = 8,
+                 W = 256,
+                 skips = [4],
+                 num_images = -1,
+                 ):
+        super().__init__()
+
+        self.fg_net = NeRF(input_ch=input_ch, D=D, W=W, skips=skips, multires=embed_multires, multires_view=embed_multires_view, use_view_dirs=use_view_dirs)
+        self.bg_net = NeRF(input_ch=input_ch + 1, D=D, W=W, skips=skips, multires=embed_multires, multires_view=embed_multires_view, use_view_dirs=use_view_dirs)
+        self.optim_autoexpo = optim_autoexpo
+        # todo : autoexpo from https://github.com/Kai-46/nerfplusplus, is currently not used here
+        if self.optim_autoexpo:
+            assert (num_images<0)
+            self.autoexpo_params = nn.ParameterDict(
+                OrderedDict([(str(x), nn.Parameter(torch.Tensor([0.5, 0.]))) for x in range(num_images)]))
+
+    def forward(self, x_fg: torch.Tensor, x_bg: torch.Tensor, view_dirs, indices=-1):
+        fg_sigma, fg_radiance = self.fg_net.forward(x_fg, view_dirs)
+        bg_sigma, bg_radiance = self.bg_net.forward(x_bg, view_dirs)
+        if self.optim_autoexpo:
+            autoexpo = self.autoexpo_params[str(indices.numpy()[0])]
+            scale = torch.abs(autoexpo[0]) + 0.5
+            shift = autoexpo[1]
+        else:
+            scale = torch.Tensor([1.]).repeat(fg_sigma.shape).to(fg_sigma.device)
+            shift = torch.Tensor([0.]).repeat(fg_sigma.shape).to(fg_sigma.device)
+            # scale = torch.Tensor([1.]).unsqueeze(-1).to(fg_sigma.device)
+            # shift = torch.Tensor([0.]).unsqueeze(-1).to(fg_sigma.device)
+
+        return fg_sigma, fg_radiance, bg_sigma, bg_radiance, scale, shift
 
 class ScalarField(nn.Module):
     # TODO: should re-use some feature/parameters from implicit-surface net.
@@ -521,6 +596,11 @@ def get_optimizer(args, model):
     return optimizer
 
 
+def get_optimizer_(params):
+    optimizer = optim.Adam(params)
+
+    return optimizer
+
 def CosineAnnealWarmUpSchedulerLambda(total_steps, warmup_steps, min_factor=0.1):
     assert 0 <= min_factor < 1
     def lambda_fn(epoch):
@@ -583,6 +663,32 @@ def get_scheduler(args, optimizer, last_epoch=-1):
         raise NotImplementedError
     return scheduler
 
+def forward_with_nablas(func, x: torch.Tensor, has_grad_bypass:bool = None):
+    has_grad = torch.is_grad_enabled() if has_grad_bypass is None else has_grad_bypass
+    # force enabling grad for normal calculation
+    with torch.enable_grad():
+        # x = x.requires_grad_(True)
+        x.requires_grad_(True)
+        out = list(func(x))
+        nabla = autograd.grad(
+            out[0],
+            x,
+            torch.ones_like(out[0], device=x.device),
+            create_graph=has_grad,
+            retain_graph=has_grad,
+            only_inputs=True)[0]
+        out.insert(1, nabla)
+    if not has_grad:
+        for i in range(len(out)):
+            try:
+                out[i] = out[i].detach()
+            except AttributeError:
+                out[i] = list(out[i])
+                for j in range(len(out[i])):
+                    out[i][j] = out[i][j].detach()
+                out[i] = tuple(out[i])
+
+    return tuple(out)
 
 if __name__ == "__main__":
     def test():

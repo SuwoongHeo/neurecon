@@ -88,7 +88,7 @@ class NeuS(nn.Module):
 
         #------- surface network
         self.implicit_surface = ImplicitSurface(
-            W_geo_feat=W_geo_feat, input_ch=input_ch, obj_bounding_size=obj_bounding_radius, **surface_cfg)
+            W_geo_feat=W_geo_feat, input_dim=input_ch, obj_bounding_size=obj_bounding_radius, **surface_cfg)
         
         #------- radiance network
         if W_geo_feat < 0:
@@ -186,7 +186,10 @@ def volume_render(
             near = near_bypass * torch.ones_like(near).to(device)
         if far_bypass is not None:
             far = far_bypass * torch.ones_like(far).to(device)
-        
+        #todo temporary thing for sphere intersection implementation
+        # if N_outside > 0 :
+        #     _, far, mask_intersect = rend_util.get_sphere_intersection(rays_o, rays_d, r=obj_bounding_radius)
+        #     assert mask_intersect.all()
         if use_view_dirs:
             view_dirs = rays_d
         else:
@@ -286,7 +289,7 @@ def volume_render(
         # pts_mid = 0.5 * (pts[..., 1:, :] + pts[..., :-1, :])
         d_mid = 0.5 * (d_all[..., 1:] + d_all[..., :-1])
         pts_mid = rays_o[..., None, :] + rays_d[..., None, :] * d_mid[..., :, None]
-
+        sample_range = torch.stack([pts.reshape((-1, 3)).min(0)[0], pts.reshape((-1, 3)).max(0)[0]])[None, None, ...]
         # ------------------
         # Inside Scene
         # ------------------
@@ -302,7 +305,7 @@ def volume_render(
         # ------------------
         if N_outside > 0:
             _t = torch.linspace(0, 1, N_outside + 2)[..., 1:-1].float().to(device)
-            d_vals_out = far / torch.flip(_t, dims=[-1])
+            d_vals_out = far / torch.flip(_t, dims=[-1]) # sorting by flip 1/_t (far ~ 1/min(_t))
             if perturb:
                 _mids = .5 * (d_vals_out[..., 1:] + d_vals_out[..., :-1])
                 _upper = torch.cat([_mids, d_vals_out[..., -1:]], -1)
@@ -317,7 +320,7 @@ def volume_render(
             views_out = view_dirs.unsqueeze(-2).expand_as(x_out[..., :3]) if use_view_dirs else None
             
             sigma_out, radiance_out = batchify_query(model.nerf_outside.forward, x_out, views_out)
-            dists = d_vals_out[..., 1:] - d_vals_out[..., :-1]
+            dists = d_vals_out[..., 1:] - d_vals_out[..., :-1] # step
             dists = torch.cat([dists, 1e10 * torch.ones(dists[..., :1].shape).to(device)], dim=-1)
             alpha_out = 1 - torch.exp(-F.softplus(sigma_out) * dists)   # use softplus instead of relu as NeuS's official repo
         
@@ -333,8 +336,8 @@ def volume_render(
             alpha_in = opacity_alpha * mask_inside.float() + alpha_out[..., :N_pts_1] * (~mask_inside).float()
             # [(B), N_ryas, N_pts-1 + N_outside]
             opacity_alpha = torch.cat([alpha_in, alpha_out[..., N_pts_1:]], dim=-1)
-            
-            # [(B), N_ryas, N_pts-1, 3]
+
+            # [(B), N_ryas, N_pts-1,+ 3]
             radiance_in = radiances * mask_inside.float()[..., None] + radiance_out[..., :N_pts_1, :] * (~mask_inside).float()[..., None]
             # [(B), N_ryas, N_pts-1 + N_outside, 3]
             radiances = torch.cat([radiance_in, radiance_out[..., N_pts_1:, :]], dim=-2)
@@ -378,6 +381,7 @@ def volume_render(
             if N_outside > 0:
                 ret_i['sigma_out'] = sigma_out
                 ret_i['radiance_out'] = radiance_out
+            ret_i['sample_range'] = sample_range
 
         return ret_i
         
@@ -425,10 +429,9 @@ class Trainer(nn.Module):
 
         intrinsics = model_input["intrinsics"].to(device)
         c2w = model_input['c2w'].to(device)
-        H = render_kwargs_train['H']
-        W = render_kwargs_train['W']
         rays_o, rays_d, select_inds = rend_util.get_rays(
-            c2w, intrinsics, H, W, N_rays=args.data.N_rays)
+            c2w, intrinsics, render_kwargs_train['H'], render_kwargs_train['W'], N_rays=args.data.N_rays,
+            jittered=args.training.jittered if args.training.get('jittered') is not None else False)
         # [B, N_rays, 3]
         target_rgb = torch.gather(ground_truth['rgb'].to(device), 1, torch.stack(3*[select_inds],-1))
 
@@ -446,6 +449,7 @@ class Trainer(nn.Module):
         # [B, N_rays]
         mask_volume: torch.Tensor = extras['mask_volume']
         # NOTE: when predicted mask is close to 1 but GT is 0, exploding gradient.
+        # swheo, Note: dueto binary cross entropy (log(0) = -inf) - exploding
         # mask_volume = torch.clamp(mask_volume, 1e-10, 1-1e-10)
         mask_volume = torch.clamp(mask_volume, 1e-3, 1-1e-3)
         extras['mask_volume_clipped'] = mask_volume
@@ -479,6 +483,13 @@ class Trainer(nn.Module):
         extras['implicit_nablas_norm'] = nablas_norm
         extras['scalars'] = {'1/s': 1./self.model.forward_s().data}
         extras['select_inds'] = select_inds
+        sample_range = extras.pop('sample_range').reshape((-1, 2, 3))
+        range_min = sample_range[:,0,:].min(0)[0]
+        range_max = sample_range[:,1,:].max(0)[0]
+        extras['scalars'].update(
+            {'minx': range_min[0], 'miny': range_min[1], 'minz': range_min[2]})
+        extras['scalars'].update(
+            {'maxx': range_max[0], 'maxy': range_max[1], 'maxz': range_max[2]})
         
         return OrderedDict(
             [('losses', losses),
@@ -532,7 +543,7 @@ def get_model(args):
         'N_upsample_iters': args.model.setdefault('N_upsample_iters', 4),
         
         'N_outside': args.model.setdefault('N_outside', 0),
-        'obj_bounding_radius': args.data.setdefault('obj_bounding_radius', 1.0),
+        'obj_bounding_radius': args.model.setdefault('obj_bounding_radius', 1.0),
         'batched': args.data.batch_size is not None,
         'perturb': args.model.setdefault('perturb', True),   # config whether do stratified sampling
         'white_bkgd': args.model.setdefault('white_bkgd', False),

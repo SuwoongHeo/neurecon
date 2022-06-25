@@ -3,6 +3,38 @@ import numpy as np
 
 import torch
 from torch.nn import functional as F
+from kornia.utils import draw_convex_polygon
+
+def get_2dmask_from_bbox(bbox, K, pose, H, W):
+    """
+    modified from neuralBody https://github.com/zju3dv/neuralbody
+    """
+    min_x, min_y, min_z = bbox[0]
+    max_x, max_y, max_z = bbox[1]
+    corners_3d = torch.as_tensor([
+        [min_x, min_y, min_z, 1.],
+        [min_x, min_y, max_z, 1.],
+        [min_x, max_y, min_z, 1.],
+        [min_x, max_y, max_z, 1.],
+        [max_x, min_y, min_z, 1.],
+        [max_x, min_y, max_z, 1.],
+        [max_x, max_y, min_z, 1.],
+        [max_x, max_y, max_z, 1.],
+    ]).to(bbox.device)
+    mask = torch.zeros((1,1,H,W), dtype=torch.float32, device=bbox.device)
+    corners_2d = K @ torch.linalg.inv(pose) @ corners_3d.T
+    corners_2d = corners_2d[:2, :] / corners_2d[2, :]
+    corners_2d = (corners_2d.T).unsqueeze(0)
+    color = torch.ones((3,), dtype=torch.float32, device=corners_2d.device)[None]
+    out_ = draw_convex_polygon(mask, corners_2d[0][[0, 1, 3, 2, 0]][None], color)
+    out_ = draw_convex_polygon(out_, corners_2d[0][[4, 5, 7, 6, 5]][None], color)
+    out_ = draw_convex_polygon(out_, corners_2d[0][[0, 1, 5, 4, 0]][None], color)
+    out_ = draw_convex_polygon(out_, corners_2d[0][[2, 3, 7, 6, 2]][None], color)
+    out_ = draw_convex_polygon(out_, corners_2d[0][[0, 2, 6, 4, 0]][None], color)
+    out_ = draw_convex_polygon(out_, corners_2d[0][[1, 3, 7, 5, 1]][None], color)
+
+    return out_[0,0]
+
 
 
 def load_K_Rt_from_P(P):
@@ -12,7 +44,7 @@ def load_K_Rt_from_P(P):
     out = cv2.decomposeProjectionMatrix(P)
     K = out[0]
     R = out[1]
-    t = out[2]
+    t = out[2] # 4x1 Translation vector
 
     K = K/K[2,2]
     intrinsics = np.eye(4)
@@ -93,6 +125,9 @@ def quat_to_rot(q):
     return R
 
 def lift(x, y, z, intrinsics):
+    # [xl, yl, zl=ones] = [[fx, sk, cx], [0, fy, cy], [0, 0, 1]]*[x,y,z]
+    # x = (xl - cx*z + sk/fy*cy*z - s/fy*yl) / fx
+    # y = (yl-cy*z)/fy
     device = x.device
     # parse intrinsics
     intrinsics = intrinsics.to(device)
@@ -109,7 +144,7 @@ def lift(x, y, z, intrinsics):
     return torch.stack((x_lift, y_lift, z, torch.ones_like(z).to(device)), dim=-1)
 
 
-def get_rays(c2w, intrinsics, H, W, N_rays=-1):
+def get_rays(c2w, intrinsics, H, W, N_rays=-1, jittered=False, mask=None):
     device = c2w.device
     if c2w.shape[-1] == 7: #In case of quaternion vector representation
         cam_loc = c2w[..., 4:]
@@ -127,7 +162,20 @@ def get_rays(c2w, intrinsics, H, W, N_rays=-1):
     i = i.t().to(device).reshape([*[1]*len(prefix), H*W]).expand([*prefix, H*W])
     j = j.t().to(device).reshape([*[1]*len(prefix), H*W]).expand([*prefix, H*W])
 
-    if N_rays > 0:
+    #todo enable super-sampling
+    if jittered and N_rays>0:
+        # Random jittered sampling
+        i = i + torch.rand(i.shape, dtype=i.dtype, device=i.device)
+        j = j + torch.rand(j.shape, dtype=j.dtype, device=j.device)
+
+    if N_rays >0 and mask != None:
+        mask_ = mask.view([*[1]*len(prefix), H*W])
+        inds = torch.where(mask_)[-1]
+        select_inds = inds[torch.randperm(inds.shape[0])[:N_rays]].expand([*prefix, N_rays])
+
+        i = torch.gather(i, -1, select_inds)
+        j = torch.gather(j, -1, select_inds)
+    elif N_rays > 0:
         N_rays = min(N_rays, H*W)
         # ---------- option 1: full image uniformly randomize
         # select_inds = torch.from_numpy(
@@ -143,6 +191,44 @@ def get_rays(c2w, intrinsics, H, W, N_rays=-1):
         j = torch.gather(j, -1, select_inds)
     else:
         select_inds = torch.arange(H*W).to(device).expand([*prefix, H*W])
+
+    pixel_points_cam = lift(i, j, torch.ones_like(i).to(device), intrinsics=intrinsics)
+
+    # permute for batch matrix product
+    pixel_points_cam = pixel_points_cam.transpose(-1,-2)
+
+    # NOTE: left-multiply.
+    #       after the above permute(), shapes of coordinates changed from [B,N,4] to [B,4,N], which ensures correct left-multiplication
+    #       p is camera 2 world matrix.
+    if len(prefix) > 0:
+        world_coords = torch.bmm(p, pixel_points_cam).transpose(-1, -2)[..., :3]
+    else:
+        world_coords = torch.mm(p, pixel_points_cam).transpose(-1, -2)[..., :3]
+    rays_d = world_coords - cam_loc[..., None, :]
+    # ray_dirs = F.normalize(ray_dirs, dim=2)
+
+    rays_o = cam_loc[..., None, :].expand_as(rays_d)
+
+    return rays_o, rays_d, select_inds
+
+def get_bound_rays(c2w, intrinsics, H, W):
+    device = c2w.device
+    if c2w.shape[-1] == 7: #In case of quaternion vector representation
+        cam_loc = c2w[..., 4:]
+        R = quat_to_rot(c2w[...,:4])
+        p = torch.eye(4).repeat([*c2w.shape[0:-1],1,1]).to(device).float()
+        p[..., :3, :3] = R
+        p[..., :3, 3] = cam_loc
+    else: # In case of pose matrix representation
+        cam_loc = c2w[..., :3, 3]
+        p = c2w
+
+    prefix = p.shape[:-2]
+    device = c2w.device
+    i, j = torch.meshgrid(torch.linspace(0, W-1, 2), torch.linspace(0, H-1, 2))
+    i = i.t().to(device).reshape([*[1]*len(prefix), 2*2]).expand([*prefix, 2*2])
+    j = j.t().to(device).reshape([*[1]*len(prefix), 2*2]).expand([*prefix, 2*2])
+    select_inds = torch.arange(2 * 2).to(device).expand([*prefix, 2 * 2])
 
     pixel_points_cam = lift(i, j, torch.ones_like(i).to(device), intrinsics=intrinsics)
 
@@ -185,11 +271,32 @@ def near_far_from_sphere(ray_origins: torch.Tensor, ray_directions: torch.Tensor
     return near, far
 
 
+def near_far_from_bbox(ray_origins: torch.Tensor, ray_directions: torch.Tensor, bounds: torch.Tensor, margin=0.05):
+    """
+    NOTE: Using AABB Alogrithm to find interections,
+    modified from https://github.com/zju3dv/neuralbody/blob/master/lib/utils/if_nerf/if_nerf_data_utils.py
+    ray_origins: camera center's coordinate
+    ray_directions: camera rays' directions. already normalized.
+    """
+    # ray_directions[(ray_directions < 1e-5) & (ray_directions > -1e-10)] = 1e-5
+    # ray_directions[(ray_directions > -1e-5) & (ray_directions < 1e-10)] = -1e-5
+    t_min = (bounds[:1].expand_as(ray_origins) - margin - ray_origins) / (ray_directions + 1e-6)
+    t_max = (bounds[1:2].expand_as(ray_origins) + margin - ray_origins) / (ray_directions + 1e-6)
+    t1 = torch.minimum(t_min, t_max)
+    t2 = torch.maximum(t_min, t_max)
+    near = torch.max(t1, dim=-1, keepdim=True)[0]
+    far = torch.min(t2, dim=-1, keepdim=True)[0]
+    valid_ray = near < far
+    # near = near[valid_ray]
+    # far = far[valid_ray]
+    return near, far, valid_ray
+
 def get_sphere_intersection(ray_origins: torch.Tensor, ray_directions: torch.Tensor, r = 1.0):
     """
     NOTE: modified from IDR. https://github.com/lioryariv/idr
     ray_origins: camera center's coordinate
     ray_directions: camera rays' directions. already normalized.
+    far : Intersection between ray and sphere (if the ray is in the bounding sphere center at origin, otherwise, 0)
     """
     rayso_norm_square = torch.sum(ray_origins**2, dim=-1, keepdim=True)
     # (minus) the length of the line projected from [the line from camera to sphere center] to [the line of camera rays]
@@ -233,6 +340,23 @@ def get_dvals_from_radius(ray_origins: torch.Tensor, ray_directions: torch.Tenso
     
     return d_vals
 
+def get_ptsoutside_from_radius(ray_origins: torch.Tensor, ray_directions: torch.Tensor, rs: torch.Tensor, r = 1.0):
+    """
+    Compute points (x',y',z') from inverse depth rs
+    Ref : https://github.com/Kai-46/nerfplusplus/blob/master/ddp_model.py
+    ray_origins: camera center's coordinate
+    ray_directions: camera rays' directions. already normalized.
+    rs: the distance to the origin
+    far_end: whether the point is on the far-end of the ray or on the near-end of the ray
+    """
+    rayso_norm_square = torch.sum(ray_origins ** 2, dim=-1, keepdim=True)
+    # NOTE: (minus) the length of the line projected from [the line from camera to sphere center] to [the line of camera rays]
+    ray_cam_dot = torch.sum(ray_origins * ray_directions, dim=-1, keepdim=True)
+
+    under_sqrt = rs ** 2 - (rayso_norm_square - ray_cam_dot ** 2)
+    assert (under_sqrt > 0).all()
+    sqrt = torch.sqrt(under_sqrt)
+
 
 def lin2img(tensor: torch.Tensor, H: int, W: int, batched=False, B=None):
     *_, num_samples, channels = tensor.shape
@@ -253,6 +377,15 @@ def lin2img(tensor: torch.Tensor, H: int, W: int, batched=False, B=None):
 
 # Hierarchical sampling (section 5.2)
 def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
+    """
+    Inverse Transform Sampling
+    Input
+        bins         : Sample interval t
+        weights      : Computed density at that point (pdf)
+        N_importance : Number of samples to take
+        det          : If perturbation on (det=False) after sampling, it will sample random point [0,1]
+                       if not, it will it will take evenly spaced sample from [0,1]. Then it will map to original pdf
+    """
     # device = weights.get_device()
     device = weights.device
     # Get pdf
@@ -280,10 +413,10 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     inds_g = torch.stack([below, above], -1)
 
     matched_shape = [*inds_g.shape[:-1], cdf.shape[-1]]  # fix prefix shape
-
+    # Find root between [below, above] of from cdf
     cdf_g = torch.gather(cdf.unsqueeze(-2).expand(matched_shape), -1, inds_g)
     bins_g = torch.gather(bins.unsqueeze(-2).expand(matched_shape), -1, inds_g)  # fix prefix shape
-
+    # From u = F^-1(y)=(1-t)F(x_0) + tF(x_1) (lies inbetween linear line of F(x_0), F(x_1))
     denom = cdf_g[..., 1] - cdf_g[..., 0]
     denom[denom<eps] = 1
     t = (u - cdf_g[..., 0]) / denom

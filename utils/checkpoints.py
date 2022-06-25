@@ -41,7 +41,10 @@ class CheckpointIO(object):
         log.info("=> Saving ckpt to {}".format(filename))
         outdict = kwargs
         for k, v in self.module_dict.items():
-            outdict[k] = v.state_dict()
+            try:
+                outdict[k] = v.state_dict()
+            except AttributeError:
+                outdict[k] = v
         torch.save(outdict, filename)
         log.info("Done.")
 
@@ -122,7 +125,10 @@ class CheckpointIO(object):
 
         for k, v in self.module_dict.items():
             if k in state_dict:
-                v.load_state_dict(state_dict[k])
+                if type(v) == torch.Tensor:
+                    self.module_dict[k] = state_dict[k]
+                else:
+                    v.load_state_dict(state_dict[k])
             else:
                 if k not in ignore_keys:
                     log.info('Warning: Could not find %s in checkpoint!' % k)

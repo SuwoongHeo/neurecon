@@ -16,19 +16,19 @@ class SceneDataset(torch.utils.data.Dataset):
                  data_dir,
                  downscale=1.,   # [H, W]
                  cam_file=None,
-                 scale_radius=-1,
-                 ):
+                 scale_radius=-1):
 
-        self.instance_dir = data_dir
         assert os.path.exists(self.instance_dir), "Data directory is empty"
 
+        self.instance_dir = data_dir
         self.train_cameras = train_cameras
+
         self.downscale = downscale
 
         image_dir = '{0}/images'.format(self.instance_dir)
-        # image_paths = sorted(glob_imgs(image_dir))
+        image_paths = sorted(glob_imgs(image_dir))
         mask_dir = '{0}/mask'.format(self.instance_dir)
-        # mask_paths = sorted(glob_imgs(mask_dir))
+        mask_paths = sorted(glob_imgs(mask_dir))
         mask_ignore_dir = '{0}/mask_out'.format(self.instance_dir)
         
         self.has_mask = os.path.exists(mask_dir) and len(os.listdir(mask_dir)) > 0

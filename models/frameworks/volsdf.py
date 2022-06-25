@@ -293,7 +293,7 @@ class VolSDF(nn.Module):
         self.use_sphere_bg = not use_nerfplusplus
         self.obj_bounding_radius = obj_bounding_radius
         self.implicit_surface = ImplicitSurface(
-            W_geo_feat=W_geo_feat, input_ch=input_ch, obj_bounding_size=obj_bounding_radius, **surface_cfg)
+            W_geo_feat=W_geo_feat, input_dim=input_ch, obj_bounding_size=obj_bounding_radius, **surface_cfg)
 
         if W_geo_feat < 0:
             W_geo_feat = self.implicit_surface.W
@@ -398,13 +398,17 @@ def volume_render(
         
         prefix_batch = [B] if batched else []
         N_rays = rays_o.shape[-2]
-        
+
         nears = near * torch.ones([*prefix_batch, N_rays, 1]).to(device)
         if use_nerfplusplus:
+            nears = near * torch.ones( [*prefix_batch, N_rays, 1]).to(device)
             _, fars, mask_intersect = rend_util.get_sphere_intersection(rays_o, rays_d, r=obj_bounding_radius)
             assert mask_intersect.all()
         else:
             fars = far * torch.ones([*prefix_batch, N_rays, 1]).to(device)
+            #todo, to compare with nes result with same configuration
+            #[(B), N_rays] x 2
+            # nears, fars = rend_util.near_far_from_sphere(rays_o, rays_d, r=obj_bounding_radius)
 
         # ---------------
         # Sample points on the rays
@@ -443,7 +447,7 @@ def volume_render(
         d_all, _ = torch.sort(d_all, dim=-1)
         # d_all = d_fine
         pts = rays_o[..., None, :] + rays_d[..., None, :] * d_all[..., :, None]
-        
+        sample_range = torch.stack([pts.reshape((-1, 3)).min(0)[0], pts.reshape((-1, 3)).max(0)[0]])[None, None, ...]
         # ---------------
         # Qeury network
         # [(B), N_rays, N_pts, 3],   # [(B), N_rays, N_pts]   [(B), N_rays, N_pts, W_geo]
@@ -529,7 +533,7 @@ def volume_render(
             if use_nerfplusplus:
                 ret_i['sigma_out'] = sigma_out
                 ret_i['radiance_out'] = radiance_out
-
+            ret_i['sample_range'] = sample_range
         return ret_i
         
     ret = {}
@@ -638,6 +642,13 @@ class Trainer(nn.Module):
         beta = beta.data
         extras['scalars'] = {'beta': beta, 'alpha': alpha}
         extras['select_inds'] = select_inds
+        sample_range = extras.pop('sample_range').reshape((-1, 2, 3))
+        range_min = sample_range[:,0,:].min(0)[0]
+        range_max = sample_range[:,1,:].max(0)[0]
+        extras['scalars'].update(
+            {'minx': range_min[0], 'miny': range_min[1], 'minz': range_min[2]})
+        extras['scalars'].update(
+            {'maxx': range_max[0], 'maxy': range_max[1], 'maxz': range_max[2]})
 
         return OrderedDict(
             [('losses', losses),

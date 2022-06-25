@@ -24,7 +24,7 @@ class UNISURF(nn.Module):
         super().__init__()
         
         self.implicit_surface = ImplicitSurface(
-            input_ch=input_ch, W_geo_feat=W_geo_feat, **surface_cfg)
+            input_dim=input_ch, W_geo_feat=W_geo_feat, **surface_cfg)
         
         if W_geo_feat < 0:
             W_geo_feat = self.implicit_surface.W
@@ -206,7 +206,7 @@ def volume_render(
         # calculate points
         # [(B), N_rays, N_query+N_freespace, 3]
         pts = rays_o[..., None, :] + rays_d[..., None, :] * d_all[..., :, None]
-        
+        sample_range = torch.stack([pts.reshape((-1,3)).min(0)[0], pts.reshape((-1,3)).max(0)[0]])[None, None, ...]
         # -------------------
         # query network
         # N_pts = N_query + N_freespace
@@ -261,6 +261,7 @@ def volume_render(
             ret_i['implicit_nablas'] = nablas
             ret_i['alpha'] = opacity_alpha
             ret_i['visibility_weights'] = visibility_weights
+            ret_i['sample_range'] = sample_range
         
         return ret_i
     
@@ -278,7 +279,10 @@ def volume_render(
         ret[k] = torch.cat(v, DIM_BATCHIFY)
 
     # # NOTE: this is for debugging, which maintains computation graph. But not suitable for validation
-    # ret = render_rayschunk(rays_o, rays_d)
+    try:
+        render_rayschunk(rays_o, rays_d)
+    except Exception:
+        foo = 1
 
     return ret['rgb'], ret['depth_volume'], ret
 
@@ -344,8 +348,15 @@ class Trainer(nn.Module):
         for v in losses.values():
             loss += v
         losses['total'] = loss
-        
-        extras['scalars'] = {'interval': torch.tensor([interval]).to(device)} 
+
+        extras['scalars'] = {'interval': torch.tensor([interval]).to(device)}
+        sample_range = extras.pop('sample_range').reshape((-1, 2, 3))
+        range_min = sample_range[:,0,:].min(0)[0]
+        range_max = sample_range[:,1,:].max(0)[0]
+        extras['scalars'].update(
+            {'minx': range_min[0], 'miny': range_min[1], 'minz': range_min[2]})
+        extras['scalars'].update(
+            {'maxx': range_max[0], 'maxy': range_max[1], 'maxz': range_max[2]})
         
         return OrderedDict(
             [('losses', losses),

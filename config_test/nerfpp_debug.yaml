@@ -1,0 +1,69 @@
+expname: nerfpp_debug
+
+# device_ids: [0]     # single gpu           ; run on specified GPU
+# device_ids: [1, 0]  # DP                   ; run on specified GPU
+device_ids: -1        # single GPU / DP / DDP; run on all available GPUs; 
+
+data:
+  batch_size: 1       # one batch, one image
+  data_dir: /ssd2/swheo/db/DTU/scan65
+  cam_file: 'cameras.npz'
+  downscale: 1        # downscale image for training
+  pin_memory: True
+
+  N_rays: 512         # N_rays for training
+  val_rayschunk: 256 # N_rays for validation
+  val_downscale: 4    # downscale image for validation
+  scale_radius: 3.0   # scale the dataset's all camera to be within this radius
+
+model:
+  framework: nerfpp
+  obj_bounding_radius: 3.0 #1.0
+
+  N_coarse: 64        # number of coarse network
+  N_importance: 64    # number of fine network
+
+  ## Original Arch.
+  coarse:
+    D: 8
+    W: 256
+    skips: [4]
+    embed_multires: 6
+    embed_multires_view: 4
+
+  fine:
+    D: 8
+    W: 256
+    skips: [ 4 ]
+    embed_multires: 6
+    embed_multires_view: 4
+
+training:
+  lr: 5.0e-4
+  jittered: True        # Jittered ray sampling using uniform distribution
+
+  log_root_dir: "logs"
+
+  with_mask: False
+  # nerfpp_specific
+  use_autoexpo: False
+
+  # lr decay
+  scheduler:
+    type: warmupcosine
+    warmup_steps: 5000 # unit: itertation steps
+
+  # num_epochs: 50000
+  num_iters: 300000 # 300k
+
+  ckpt_file: null # will be read by python as None
+  ckpt_ignore_keys: []     # only change if you want to drop certain keys in the saved checkpionts.
+  ckpt_only_use_keys: null # only change if you want to only use certain keys in the saved checkpionts.
+
+  monitoring: tensorboard
+
+  i_save: 900       # unit: seconds
+  i_backup: 50000   # unit: itertation steps
+
+  i_val: 500
+  i_val_mesh: 1000

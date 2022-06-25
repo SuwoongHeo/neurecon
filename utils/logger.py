@@ -93,19 +93,21 @@ class Logger(object):
 
         self.stats[category][k].append((it, vec))
 
-    def add_imgs(self, imgs, class_name, it):
+    def add_imgs(self, imgs, class_name, it, prefix='', monitor=True):
         outdir = os.path.join(self.img_dir, class_name)
         if self.is_master and not os.path.exists(outdir):
             os.makedirs(outdir)
         if self.multi_process_logging:
             dist.barrier()
-        outfile = os.path.join(outdir, '{:08d}_{}.png'.format(it, self.rank))
+
+        outfile = os.path.join(outdir, '{:08d}_{}.png'.format(it, self.rank)) if prefix == None \
+            else os.path.join(outdir, '{:08d}_{}_{}.png'.format(it, prefix, self.rank))
 
         # imgs = imgs / 2 + 0.5
         imgs = torchvision.utils.make_grid(imgs)
         torchvision.utils.save_image(imgs.clone(), outfile, nrow=8)
 
-        if self.monitoring == 'tensorboard':
+        if self.monitoring == 'tensorboard' and monitor:
             self.tb.add_image(class_name, imgs, global_step=it)
 
     def add_figure(self, fig, class_name, it, save_img=True):

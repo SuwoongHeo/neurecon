@@ -232,12 +232,14 @@ def main_function(args):
     state_dict = torch.load(ckpt_file, map_location=args.device)
     model.load_state_dict(state_dict['model'])
     model.to(args.device)
-    
+
+    # Use surface renderer rather than volume rendering
     if args.use_surface_render:
         assert args.use_surface_render == 'sphere_tracing' or args.use_surface_render == 'root_finding'
         from models.ray_casting import surface_render
         render_fn = functools.partial(surface_render, model=model, ray_casting_algo=args.use_surface_render)
-    
+
+    # Todo: To use other radiance_net model
     if args.alter_radiance is not None:
         state_dict = torch.load(args.alter_radiance, map_location=args.device)
         radiance_state_dict = {}

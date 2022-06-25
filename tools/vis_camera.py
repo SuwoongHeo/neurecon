@@ -2,10 +2,11 @@
 camera extrinsics visualization tools
 modified from https://github.com/opencv/opencv/blob/master/samples/python/camera_calibration_show_extrinsics.py
 '''
-
-from utils.print_fn import log
 # Python 2/3 compatibility
 from __future__ import print_function
+
+from utils.print_fn import log
+
 
 import numpy as np
 import cv2 as cv
@@ -14,7 +15,7 @@ from numpy import linspace
 import matplotlib
 
 matplotlib.use('TkAgg')
-
+# Same
 def inverse_homogeneoux_matrix(M):
     R = M[0:3, 0:3]
     T = M[0:3, 3]
@@ -24,20 +25,20 @@ def inverse_homogeneoux_matrix(M):
 
     return M_inv
 
-
+# Same
 def transform_to_matplotlib_frame(cMo, X, inverse=False):
     M = np.identity(4)
-    M[1, 1] = 0
-    M[1, 2] = 1
-    M[2, 1] = -1
-    M[2, 2] = 0
+    # M[1, 1] = 0
+    # M[1, 2] = 1
+    # M[2, 1] = -1
+    # M[2, 2] = 0
 
     if inverse:
         return M.dot(inverse_homogeneoux_matrix(cMo).dot(X))
     else:
         return M.dot(cMo.dot(X))
 
-
+# Same
 def create_camera_model(camera_matrix, width, height, scale_focal, draw_frame_axis=False):
     fx = camera_matrix[0, 0]
     fy = camera_matrix[1, 1]
@@ -93,7 +94,7 @@ def create_camera_model(camera_matrix, width, height, scale_focal, draw_frame_ax
     else:
         return [X_img_plane, X_triangle, X_center1, X_center2, X_center3, X_center4]
 
-
+# Same
 def create_board_model(extrinsics, board_width, board_height, square_size, draw_frame_axis=False):
     width = board_width*square_size
     height = board_height*square_size
@@ -125,16 +126,16 @@ def create_board_model(extrinsics, board_width, board_height, square_size, draw_
     else:
         return [X_board]
 
-
+# from draw_camera_boards
 def draw_camera(ax, camera_matrix, cam_width, cam_height, scale_focal,
                 extrinsics,
                 patternCentric=True,
                 annotation=True):
     from matplotlib import cm
 
-    min_values = np.zeros((3, 1))
+    # min_values = np.zeros((3, 1))
     min_values = np.inf
-    max_values = np.zeros((3, 1))
+    # max_values = np.zeros((3, 1))
     max_values = -np.inf
 
     X_moving = create_camera_model(
@@ -166,12 +167,12 @@ def draw_camera(ax, camera_matrix, cam_width, cam_height, scale_focal,
     return min_values, max_values
 
 
-def visualize(camera_matrix, extrinsics):
+def visualize(camera_matrix, extrinsics, cam_width=0.064/2, cam_height=0.048/2, scale_focal=40):
 
     ########################    plot params     ########################
-    cam_width = 0.064/2     # Width/2 of the displayed camera.
-    cam_height = 0.048/2    # Height/2 of the displayed camera.
-    scale_focal = 40        # Value to scale the focal length.
+    # cam_width = 0.064/2     # Width/2 of the displayed camera.
+    # cam_height = 0.048/2    # Height/2 of the displayed camera.
+    # scale_focal = 40        # Value to scale the focal length.
 
     ########################    original code    ########################
     import matplotlib.pyplot as plt
@@ -208,6 +209,113 @@ def visualize(camera_matrix, extrinsics):
     plt.show()
     log.info('Done')
 
+
+def visualize_cam_spherical_spiral(intr, extrs, up_vec, c0, focus_center, n_rots, up_angle):
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from scipy.spatial.transform import Rotation as R
+
+    cam_width = 0.2 / 2  # Width/2 of the displayed camera.
+    cam_height = 0.1 / 2  # Height/2 of the displayed camera.
+    scale_focal = 2000  # Value to scale the focal length.
+
+    fig = plt.figure()
+    ax = fig.gca(projection='3d')
+    # ax.set_aspect("equal")
+    ax.set_aspect("auto")
+
+    matplotlib.rcParams.update({'font.size': 22})
+    # ----------- draw cameras
+    min_values, max_values = draw_camera(ax, intr, cam_width, cam_height, scale_focal, extrs, True)
+
+    radius = np.linalg.norm(c0)
+
+    # ----------- draw small circle
+    # key rotations of a spherical spiral path
+    num_pts = int(n_rots * 180.)
+    sphere_thetas = np.linspace(0, np.pi * 2. * n_rots, num_pts)
+    sphere_phis = np.linspace(0, up_angle, num_pts)
+    # first rotate about up vec
+    rots_theta = R.from_rotvec(sphere_thetas[:, None] * up_vec[None, :])
+    pts = rots_theta.apply(c0)
+    # then rotate about horizontal vec
+    horizontal_vec = np.cross(pts - focus_center[None, :], up_vec[None, :], axis=-1)
+    horizontal_vec = horizontal_vec / (np.linalg.norm(horizontal_vec, axis=-1, keepdims=True) + 1e-9)
+    rots_phi = R.from_rotvec(sphere_phis[:, None] * horizontal_vec)
+    pts = rots_phi.apply(pts)
+    # [x, z, -y]
+    ax.plot(pts[:, 0], pts[:, 2], -pts[:, 1], color='black')
+
+    # ----------- draw sphere
+    u = np.linspace(0, 2 * np.pi, 100)
+    v = np.linspace(0, np.pi, 100)
+    x = radius * np.outer(np.cos(u), np.sin(v))
+    y = radius * np.outer(np.sin(u), np.sin(v))
+    z = radius * np.outer(np.ones(np.size(u)), np.cos(v))
+    ax.plot_surface(x, y, z, rstride=4, cstride=4, color='grey', linewidth=0, alpha=0.1)
+
+    # ----------- draw axis
+    axis = np.array([[0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]])
+    X, Y, Z, U, V, W = zip(*axis)
+    ax.quiver(X[0], Z[0], -Y[0], U[0], W[0], -V[0], color='red')
+    ax.quiver(X[1], Z[1], -Y[1], U[1], W[1], -V[1], color='green')
+    ax.quiver(X[2], Z[2], -Y[2], U[2], W[2], -V[2], color='blue')
+
+    ax.set_xlabel('x')
+    ax.set_ylabel('z')
+    ax.set_zlabel('-y')
+
+    plt.show()
+
+
+def visualize_cam_on_circle(intr, extrs, up_vec, c0):
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from scipy.spatial.transform import Rotation as R
+
+    cam_width = 0.2 / 2  # Width/2 of the displayed camera.
+    cam_height = 0.1 / 2  # Height/2 of the displayed camera.
+    scale_focal = 2000  # Value to scale the focal length.
+
+    fig = plt.figure()
+    ax = fig.gca(projection='3d')
+    # ax.set_aspect("equal")
+    ax.set_aspect("auto")
+
+    matplotlib.rcParams.update({'font.size': 22})
+    # ----------- draw cameras
+    min_values, max_values = draw_camera(ax, intr, cam_width, cam_height, scale_focal, extrs, True)
+
+    radius = np.linalg.norm(c0)
+
+    # ----------- draw small circle
+    angles = np.linspace(0, np.pi * 2., 180)
+    rots = R.from_rotvec(angles[:, None] * up_vec[None, :])
+    # [180, 3]
+    pts = rots.apply(c0)
+    # [x, z, -y]
+    ax.plot(pts[:, 0], pts[:, 2], -pts[:, 1], color='black')
+
+    # ----------- draw sphere
+    u = np.linspace(0, 2 * np.pi, 100)
+    v = np.linspace(0, np.pi, 100)
+    x = radius * np.outer(np.cos(u), np.sin(v))
+    y = radius * np.outer(np.sin(u), np.sin(v))
+    z = radius * np.outer(np.ones(np.size(u)), np.cos(v))
+    ax.plot_surface(x, y, z, rstride=4, cstride=4, color='grey', linewidth=0, alpha=0.1)
+
+    # ----------- draw axis
+    axis = np.array([[0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]])
+    X, Y, Z, U, V, W = zip(*axis)
+    ax.quiver(X[0], Z[0], -Y[0], U[0], W[0], -V[0], color='red')
+    ax.quiver(X[1], Z[1], -Y[1], U[1], W[1], -V[1], color='green')
+    ax.quiver(X[2], Z[2], -Y[2], U[2], W[2], -V[2], color='blue')
+
+    ax.set_xlabel('x')
+    ax.set_ylabel('z')
+    ax.set_zlabel('-y')
+
+    plt.show()
 
 if __name__ == '__main__':
     import argparse

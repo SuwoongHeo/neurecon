@@ -68,10 +68,12 @@ def main_function(args):
         dataloader = DataLoader(dataset,
             batch_size=bs,
             shuffle=True,
-            pin_memory=args.data.get('pin_memory', False))
+            pin_memory=args.data.get('pin_memory', False),
+            num_workers=4)
         valloader = DataLoader(val_dataset,
             batch_size=1,
-            shuffle=True)
+            shuffle=True,
+            num_workers=4)
     
     # Create model
     model, trainer, render_kwargs_train, render_kwargs_test, volume_render_fn = get_model(args)
@@ -165,6 +167,8 @@ def main_function(args):
                                 logger.add_imgs(to_img((ret['depth_surface']/ret['depth_surface'].max()).unsqueeze(-1)), 'val/pred_depth_surface', it)
                             if 'mask_surface' in ret:
                                 logger.add_imgs(to_img(ret['mask_surface'].unsqueeze(-1).float()), 'val/predicted_mask', it)
+                            if 'label_map_color' in ret:
+                                logger.add_imgs(to_img(ret['label_map_color']), 'val/predicted_segm', it)
                             if hasattr(trainer, 'val'):
                                 trainer.val(logger, ret, to_img, it, render_kwargs_test)
                             
@@ -178,11 +182,18 @@ def main_function(args):
                         if i_val_mesh > 0 and (int_it % i_val_mesh == 0 or int_it in special_i_val_mesh) and it != 0:
                             with torch.no_grad():
                                 io_util.cond_mkdir(mesh_dir)
-                                mesh_util.extract_mesh(
-                                    model.implicit_surface, 
-                                    filepath=os.path.join(mesh_dir, '{:08d}.ply'.format(it)),
-                                    volume_size=args.data.get('volume_size', 2.0),
-                                    show_progress=is_master())
+                                if hasattr(model, 'finenet'):
+                                    mesh_util.extract_mesh_nerfpp(
+                                        model.finenet,
+                                        filepath=os.path.join(mesh_dir, '{:08d}.ply'.format(it)),
+                                        volume_size=args.data.get('volume_size', 2.0),
+                                        show_progress=is_master())
+                                else:
+                                    mesh_util.extract_mesh(
+                                        model.implicit_surface,
+                                        filepath=os.path.join(mesh_dir, '{:08d}.ply'.format(it)),
+                                        volume_size=args.data.get('volume_size', 2.0),
+                                        show_progress=is_master())
 
                     if it >= args.training.num_iters:
                         end = True
@@ -258,7 +269,7 @@ def main_function(args):
                             logger.add("extras_{}".format(n), "{}.norm".format(p), extras[key].norm().data.cpu().numpy().item(), it)
                     if 'scalars' in extras:
                         for k, v in extras['scalars'].items():
-                            logger.add('scalars', k, v.mean(), it)                           
+                            logger.add('scalars', k, v.mean().data.cpu().numpy().item(), it)
 
                     #---------------------
                     # end of one iteration
