@@ -1,3 +1,5 @@
+import os
+import trimesh
 import torch as T
 import numpy as np
 import torch.nn.functional as F
@@ -9,9 +11,10 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TkAgg')
 
+stability_scale_default=50
 
 class Mesh(object):
-    def __init__(self, vertices=None, faces=None, file_name=None, **kwargs):
+    def __init__(self, vertices=None, faces=None, file_name=None, stability_scale=stability_scale_default, **kwargs):
         assert (np.any(vertices != None) and np.any(faces != None)) or (file_name != None), "at least vertices, faces or path to '.obj' file should be provided"
         if file_name is not None:
             assert file_name.split('.')[-1] == 'obj', "sobj file is supported only"
@@ -25,7 +28,7 @@ class Mesh(object):
             faces = np.array(faces, dtype=np.int64)
             uv = np.array(kwargs['uv'], dtype=np.float32) if 'uv' in kwargs.keys() else np.array([])
             faces_uv = np.array(kwargs['faces_uv'], dtype=np.int64) if 'faces_uv' in kwargs.keys() else np.array([])
-
+        self.stability_scale = stability_scale
         self.vertices = T.from_numpy(vertices)
         self.uv = T.from_numpy(uv)
         self.faces = T.from_numpy(faces)
@@ -38,13 +41,14 @@ class Mesh(object):
         self.vertices = vertices
         # Compute face related attributes
         # self.faces_normal, self.faces_area, self.edges = computeFaceNormal(self.vertices, self.faces)
-        self.vert_normal, self.faces_normal, self.faces_area, self.edges = computeNormals(self.vertices, self.faces, stability_scale=stability_scale)
+        self.vert_normal, self.faces_normal, self.faces_area, self.edges = \
+            computeNormals(self.vertices, self.faces, stability_scale=self.stability_scale)
         self.triangles = self.vertices[self.faces]
         self.faces_center = self.triangles.mean(dim=-2)
         # self.faces_framerot = computeFrameRot(self.faces_normal)
         self.faces_tanframe = computeTangentFrame(self.faces_normal, self.edges[:,0,:].squeeze()) # Use fixed axis
         ## Compute vars for point to mesh projection
-        self.project_func = ProjectMesh2Point(self)
+        self.project_func = ProjectMesh2Point(self, stability_scale=self.stability_scale)
 
     def get_uv_from_st(self, st:T.tensor, idx):
         """
@@ -101,12 +105,14 @@ class ProjectMesh2Point(object):
     """
     ref : https://www.geometrictools.com/Documentation/DistancePoint3Triangle3.pdf
     """
-    def __init__(self, mesh :Mesh, stability_scale=1e3):
-        self.stability_scale = stability_scale
+    def __init__(self, mesh :Mesh, stability_scale=stability_scale_default):
+        self.stability_scale = stability_scale #1
+        tri = mesh.triangles*self.stability_scale
+
         # Note. edge is oriented in right-handed direction,
-        self.E0 = stability_scale * mesh.edges[:,0].squeeze()
-        self.E1 = -stability_scale * mesh.edges[:,1].squeeze()
-        self.B = stability_scale * mesh.triangles[:,0].squeeze()
+        self.E0 = tri[:, 1, :] - tri[:, 0, :] # mesh.edges[:,0].squeeze()
+        self.E1 = tri[:, 2, :] - tri[:, 0, :] #mesh.edges[:,1].squeeze()
+        self.B = tri[:,0] # mesh.triangles[:,0].squeeze()
         for key in pmkeys:
             setattr(self, key, [])
 
@@ -114,10 +120,25 @@ class ProjectMesh2Point(object):
         self.a = T.sum(self.E0 * self.E0, dim=-1) # inner product
         self.b = T.sum(self.E0 * self.E1, dim=-1)
         self.c = T.sum(self.E1 * self.E1, dim=-1)
-        self.delta = self.a * self.c - self.b**2
+        self.delta = T.abs(self.a * self.c - self.b**2) # prevent small edge length error
         self.h = self.a - 2*self.b + self.c
 
-    def __call__(self, query, index):
+    def __call__(self, query, index, eps=0, use_cgd=False):
+        """
+        The projected point is computed by
+        Pout = B + sout*E0 + tout*E1
+        query : Px3 vector
+        index : Px1 indices for updateing vars
+        """
+        if not use_cgd:
+            Pout, st = self.compute_projection(query, index, eps)
+        else:
+            NotImplementedError #todo do it later
+            # Pout, st = self.compute_proejction_cgd(query, index, eps)
+
+        return Pout, st
+
+    def compute_projection(self, query, index, eps=0):
         """
         The projected point is computed by
         Pout = B + sout*E0 + tout*E1
@@ -153,7 +174,7 @@ class ProjectMesh2Point(object):
         tout = T.zeros_like(tbar, device=tbar.device)
 
         # Region classification
-        r_conds = T.stack([(sbar+tbar)<=delta, sbar>=0., tbar>=0., bd>ce, d<0, be>ad])
+        r_conds = T.stack([(sbar+tbar)<=delta, sbar>=eps, tbar>=eps, bd<ce, d<-eps, be>ad])
 
         # Inside triangle
         r_0 = r_conds[0] & r_conds[1] & r_conds[2] # region 0
@@ -168,9 +189,9 @@ class ProjectMesh2Point(object):
         # region 2
         r_2 = ~r_conds[0] & ~r_conds[1] & r_conds[2]
         r_2a = r_2 & r_conds[3] # region 2-a
+        r_2b = r_2 & ~r_conds[3]  # region 2-b
         sout[r_2a] = T.clip(g[r_2a] / h[r_2a], 0., 1.)
         tout[r_2a] = 1 - sout[r_2a]
-        r_2b = r_2 & ~r_conds[3] # region 2-b
         tout[r_2b] = T.clip(-e[r_2b]/c[r_2b], 0., 1.) # Note. sout=0 in r_2b
 
         # region 3
@@ -191,22 +212,24 @@ class ProjectMesh2Point(object):
         # region 6
         r_6 = ~r_conds[0] & r_conds[1] & ~r_conds[2]
         r_6a = r_6 & r_conds[5]
+        r_6b = r_6 & ~r_conds[5]
         tout[r_6a] = T.clip(k[r_6a]/h[r_6a], 0., 1.)
         sout[r_6a] = 1 - tout[r_6a]
-        r_6b = r_6 & ~r_conds[5]
         tout[r_6b] = T.clip(-d[r_6b]/a[r_6b], 0., 1.) # Note sout=0 in r_6b
 
         # Sanity check
         # Should be false all
-        # r_1 & r_2 & r_3 & r_4 & r_5 & r_6
-        # (r_2a & r_2b) | (r_4a & r_4b) | (r_6a & r_6b)
+        # r_ = T.cat([r_0[...,None], r_1[...,None], r_2a[...,None],
+        # r_2b[...,None],r_3[...,None], r_4a[...,None], r_4b[...,None],r_5[...,None], r_6a[...,None], r_6b[...,None]], dim=-1)
+        # r_.sum(dim=-1) should be 1 for all
 
         Pout = B + sout[...,None]*E0 + tout[...,None]*E1
 
         return Pout/self.stability_scale, (sout, tout)
 
-def computeNormals(v, f):
-    tri = v[f]
+def computeNormals(v, f, stability_scale=stability_scale_default):
+    # Ref : https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/structures/meshes.html#Meshes.__init__
+    tri = v[f] * stability_scale
     edges = T.stack([tri[:,1,:] - tri[:,0,:],
                     tri[:,0,:] - tri[:,2,:],
                     tri[:,2,:] - tri[:,1,:]], dim=-1).transpose(-2,-1)
@@ -221,7 +244,7 @@ def computeNormals(v, f):
     v_norm = v_norm.index_add(0, f.reshape(-1), v_cross.repeat(1, 3).reshape(-1, 3))
     v_norm = v_norm/T.linalg.norm(v_norm, dim=-1).unsqueeze(-1)
 
-    return v_norm, f_norm, v_cross_norm, edges
+    return v_norm, f_norm, v_cross_norm, edges/stability_scale
 
 def computeTangentFrame(vn, b_X=None):
     """
@@ -270,12 +293,7 @@ def computeTangentFrame(vn, b_X=None):
 #
 #     return R
 
-    # degeneracy check
-    assert T.linalg.norm(a, dim=-1).min()>0, 'computeFrameRot has error, need degeneracy check'
-
-    return R
-
-def project2closest_face(query, mesh: Mesh, stability_scale=1e3):
+def project2closest_face(query, mesh: Mesh, use_cgd=False, stability_scale=stability_scale_default):
     """
     query : [(B), N_rays, N_samples+N_importance, 3]
     mesh : Mesh class.
@@ -296,16 +314,22 @@ def project2closest_face(query, mesh: Mesh, stability_scale=1e3):
     vquery = query.view(-1, 3)
 
     # point to tri distance
-    dists, idxs = _C.point_face_dist_forward(
-        vquery*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64),
-        tris*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64), vquery.size()[0]
-    )
+    with T.no_grad():
+        dists, idxs = _C.point_face_dist_forward(
+            vquery*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64),
+            tris*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64), vquery.size()[0], 5e-3
+        )
 
-    vnear, st = mesh.project_func(vquery, idxs)
+    vnear, st = mesh.project_func(vquery, idxs, eps=0, use_cgd=use_cgd)
 
     st_ = T.cat([st[0].view((B, N_ray, N_pts, -1)), st[1].view((B, N_ray, N_pts, -1))], dim=-1)
+    if T.any(~T.norm(stability_scale*(vnear-vquery), dim=-1).isclose(T.sqrt(dists))):
+        foo = 1 #Numerically hard to get exact match
+        # _, _, = mesh.project_func(vquery, idxs, eps=1e-12)
     vnear = vnear.view((B, N_ray, N_pts, -1))
     idxs = idxs.view((B, N_ray, N_pts))
+
+
     return vnear, st_, idxs
 
 def texcoord2imcoord(vt, height, width):
@@ -320,23 +344,34 @@ def texcoord2imcoord(vt, height, width):
     uv = T.cat(((width - 1) * v, (height - 1) * u), -1)
     return uv
 
+
+def _approx_inout_sign_by_normals(query, vnear, bc, tri_vert_normals):
+    # Approximate inside / outside surface by using normal
+    normal_at_s = T.sum((tri_vert_normals*bc.unsqueeze(-1)), dim=-2).squeeze(dim=-2)
+    contains = T.sum((query-vnear)*normal_at_s, dim=-1) < 0.
+    contains = 1 - 2*contains
+    return contains
+
+def _approx_inout_sign_raytracing(query, mesh):
+    raise NotImplementedError
+    # mesh_tr = trimesh.Trimesh(vertices=mesh.vertices.detach().cpu().numpy().copy(),
+    #                           faces=mesh.faces.detach().cpu().numpy().copy(), process=False)
+    # trimesh_intersector = trimesh.ray.ray_pyembree.RayMeshIntersector(mesh_tr)
+    # query_tr = query.detach().cpu().numpy().copy()
+    #
+    # contains = trimesh_intersector.contains_points(query_tr) #[n, ] bool
+    # contains = T.tensor(contains).to(query.device)
+    # contains = 1 - 2*contains #{-1, 1}, -1 for inside, +1 for outside
+
+    # return contains
+
+
 if __name__=="__main__":
     from pytorch3d.utils import ico_sphere
     from pytorch3d.io import IO
     from pytorch3d.structures import Meshes
     from pytorch3d.renderer import TexturesVertex
     from zju_smpl.body_model import SMPLlayer
-    # smpl_dir = '../assets/smpl/smpl/smpl_uv.obj'
-    # smpl = SMPLlayer('../assets/smpl/smpl', model_type='smpl', gender='neutral')
-    # verts = smpl.v_template.numpy()
-    # faces = smpl.faces
-    # faces = mesh_.faces_list()[0].numpy()
-    # mesh = Mesh(vertices=smpl.v_template, faces=smpl.faces)
-    # mesh = IO().load_mesh(smpl_dir)
-    # mesh_ = ico_sphere(1)
-    # verts = mesh_.verts_list()[0].numpy()
-    # faces = mesh_.faces_list()[0].numpy()
-    # mesh = Mesh(vertices=verts, faces=faces)
 
     # Green for smpl mesh
     # color = T.tensor([0., 1., 0.]).view(1, 1, 3).expand(-1, smpl.nVertices, -1)
@@ -348,6 +383,7 @@ if __name__=="__main__":
     # faces = mesh.faces_list()[0]
     # tris = verts[faces]
     # mesh = Mesh(vertices=smpl.v_template, faces=smpl.faces)
+
     mesh = Mesh(file_name='../assets/smpl/smpl/smpl_uv.obj')
     N_ray = 128
     N_sample = 128
