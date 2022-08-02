@@ -994,7 +994,7 @@ class Trainer(nn.Module):
             H=H, W=W,
             batched=render_kwargs_test['batched'])
         val_imgs = dict()
-        val_imgs['val/gt_rgb'] = to_img(target_rgb)
+        val_imgs['val/gt_rgb'] = to_img(target_rgb[mask].unsqueeze(0), mask=mask) if mask is not None else to_img(target_rgb)
         if 'label_map_color' in ret:
             val_imgs['val/gt_segm'] = to_img(self.model.decoder.labels_cmap[target_segm])
         val_imgs['val/predicted_rgb'] = to_img(rgb, mask=mask)
