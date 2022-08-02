@@ -4,6 +4,7 @@ from models.layers.pop_backbone import get_unet_backbone
 
 from zju_smpl.body_model import SMPLlayer
 from utils.geometry import Mesh, project2closest_face, texcoord2imcoord
+from utils.dispproj import DispersedProjector, _approx_inout_sign_by_normals
 
 import os
 import copy
@@ -93,7 +94,6 @@ def sample_feature_volume_uv(uv, feat_volume, splits=[]):
 
 asset_dir = os.path.dirname(os.path.abspath(__file__)) + "/../../assets/"
 smpl_dir = '../../assets/smpl/smpl'
-from utils.geometry import project2closest_face
 
 class GarmentNerf(nn.Module):
     def __init__(self,
@@ -145,6 +145,13 @@ class GarmentNerf(nn.Module):
         self.mesh = Mesh(file_name=os.path.join(asset_dir, 'smpl/smpl/smpl_uv.obj'))
         self.tposeInfo = None
         self.transInfo = None
+        if self.input_type == 'dispproj':
+            self.dispprojfunc = DispersedProjector(cache_path='assets/smpl/smpl', mesh=self.mesh)
+            # todo check Author's original impl
+            # from utils.Disperse_projection_ref import SurfaceAlignedConverter
+            # self.dispprojfunc_ = SurfaceAlignedConverter(verts=self.mesh.vertices, faces=self.mesh.faces, device=self.mesh.device,
+            #                                             cache_path='assets/smpl/smpl')
+
         # uvmap = torch.from_numpy(load_rgb(os.path.join(asset_dir, 'smpl/smpl/smpl_uv.png'), downscale=4))
         # self.uvmask = uvmap[-1]
         # self.uvmap = uvmap[:-1] * self.uvmask.unsqueeze(0)
@@ -152,6 +159,9 @@ class GarmentNerf(nn.Module):
     def to(self, device):
         new_self = super(GarmentNerf, self).to(device)
         new_self.mesh.to(device)
+        if self.input_type=='dispproj':
+            new_self.dispprojfunc.to(device)
+            # new_self.dispprojfunc_.to(device)
 
         return new_self
 
@@ -168,8 +178,6 @@ class GarmentNerf(nn.Module):
         if iduvmap is None:
             idGfeat, idCfeat, idSfeat = None, None, None
         else:
-            # idGmap = iduvmap[:, :self.W_idG_feat, ...]
-            # idCmap = iduvmap[:, self.W_idC_feat:, ...]
             idGfeat, idCfeat, idSfeat = iduvmap.split([self.W_idG_feat, self.W_idC_feat, self.W_idS_feat], dim=1)
             if self.idfeat_layer is not None:
                 idGfeat = self.idfeat_layer(idGfeat) if idGfeat.shape[1] != 0 else None
@@ -193,14 +201,14 @@ class GarmentNerf(nn.Module):
         # Note. sign means whether it the line between x to surface is aligned (+) or reverse (-)
         if len(x.shape)<3:
             x = x.unsqueeze(0)
-        vnear, st, idxs = project2closest_face(x, self.mesh)
-        uv = self.mesh.get_uv_from_st(st, idxs)
-        uv_ = texcoord2imcoord(uv, 2, 2)
+
+        vnear, st, idxs = project2closest_face(x, self.mesh, stability_scale = 50.) #todo use argument!
 
         if self.input_type == 'xyz':
             uvh = x
         elif self.input_type == 'uvh':
-            # # todo sdf version
+            uv = self.mesh.get_uv_from_st(st, idxs)
+            uv_ = texcoord2imcoord(uv, 2, 2)
             trinorms = self.mesh.faces_normal[idxs]
             x_diff = x - vnear
             # Note. To prevent Nan, use square distance rather than using sqrt()
@@ -215,8 +223,10 @@ class GarmentNerf(nn.Module):
                           st[...,0].unsqueeze(-1)*self.tposeInfo['E0'][idxs] + \
                           st[...,1].unsqueeze(-1)*self.tposeInfo['E1'][idxs]
             # x_tpose = (self.tposeInfo['tanframe'][idxs].transpose(-1, -2) @ x_tf)[...,0] + vnear_tpose
-            x_tpose = (torch.linalg.inv(self.tposeInfo['tanframe'][idxs]) @ x_tf)[..., 0] + vnear_tpose
-            uvh = x_tpose  # + self.resenc(x).unsqueeze(1)
+            x_tpose = (self.tposeInfo['tanframe_inv'][idxs] @ x_tf)[..., 0] + vnear_tpose
+            # x_sign = torch.tanh(100.0 * torch.sum(trinorms * x_diff, dim=-1).unsqueeze(-1))
+            # uvh = x_tpose  # + self.resenc(x).unsqueeze(1)
+            uvh = torch.cat([x_tpose, vnear_tpose], dim=-1)
         elif self.input_type == 'invskin':
             # Move to smpl object(canonical)  space
             W = self.transInfo['W']
@@ -232,11 +242,64 @@ class GarmentNerf(nn.Module):
             q_inv = torch.linalg.inv(T)@(q_hom.view(-1,4,1))
             q_inv = q_inv[...,:3, 0].view(x.shape)
             uvh = q_inv
+        elif self.input_type == 'directproj':
+            # todo dispersed projection
+            vnear_tpose = self.tposeInfo['B'][idxs] + \
+                          st[..., 0].unsqueeze(-1) * self.tposeInfo['E0'][idxs] + \
+                          st[..., 1].unsqueeze(-1) * self.tposeInfo['E1'][idxs]
+
+            x_sign = _approx_inout_sign_by_normals(x, vnear,
+                                                  torch.cat([(1 - torch.sum(st, -1)).unsqueeze(-1), st], dim=-1)
+                                                  , self.mesh.vert_normal[self.mesh.faces][idxs]).unsqueeze(-1)
+            x_diff = x - vnear
+            x_dists = torch.norm(x_diff, dim=-1).unsqueeze(-1)
+
+            uvh = torch.cat([vnear_tpose, x_dists * x_sign], dim=-1)
+            # debug
+            # from dataio.MviewTemporalSMPL import plotly_viscorres3D
+            # plotly_viscorres3D(vnear[..., :1, :].detach().cpu(), x[..., :1, :].detach().cpu(),
+            #                    x_diff[..., :1, :].detach().cpu(), self.mesh.vertices.detach().cpu(),
+            #                    self.mesh.faces.detach().cpu(), faces_tanframe=None)
+        elif self.input_type == "dispproj":
+            # # todo keep Author's original impl
+            # if len(x.shape) == 3:
+            #     N_ray = 1
+            #     B, N_pts, _ = x.shape
+            # elif len(x.shape) == 4:
+            #     B, N_ray, N_pts, _ = x.shape
+            # else:
+            #     N_ray, B = 1, 1
+            #     N_pts, _ = x.shape
+            #
+            # uvh_, nearest, nearest_new, barycentric = self.dispprojfunc_.xyz_to_xyzch(x.view(1,-1,3),
+            #                                                              self.mesh.vertices.unsqueeze(0),
+            #                                                              xyzc_in=self.tposeInfo['vertices'], debug=True)
+            # uvh_ = uvh_.view((B, N_ray, N_pts, -1))
+
+            # Dispersed projection
+            h, st_, _, vnear_, idxs_ = self.dispprojfunc(x, self.mesh, vnear=vnear, st=st, idxs=idxs)
+            vnear_tpose = self.tposeInfo['B'][idxs_] + \
+                          st_[..., 0].unsqueeze(-1) * self.tposeInfo['E0'][idxs_] + \
+                          st_[..., 1].unsqueeze(-1) * self.tposeInfo['E1'][idxs_]
+
+            uvh = torch.cat([vnear_tpose, h], dim=-1)
+
+            # debug
+            # from dataio.MviewTemporalSMPL import plotly_viscorres3D
+            # numpts = 5
+            # plotly_viscorres3D(self.mesh.vertices.detach().cpu(), self.mesh.faces.detach().cpu(),
+            #                    query=x[..., :numpts, :].detach().cpu(),
+            #                    vnear=vnear_[..., :numpts, :].detach().cpu(), pp_color=vnear[..., :numpts, :].detach().cpu(),
+            #                    faces_tanframe=None)
+            # plotly_viscorres3D(self.tposeInfo['vertices'].detach().cpu(), self.mesh.faces.detach().cpu(),
+            #                    query=x[..., :numpts, :].detach().cpu(),
+            #                    vnear=vnear_tpose[..., :numpts, :].detach().cpu(), pp_color=vnear[..., :numpts, :].detach().cpu(),
+            #                    faces_tanframe=None)
         else:
             raise NotImplementedError
 
-        # uvh = x.unsqueeze(1)
-
+        uv = self.mesh.get_uv_from_st(st, idxs)
+        uv_ = texcoord2imcoord(uv, 2, 2)
         # # Align to each coordinate frame
         aggrfeat = torch.Tensor(0).to(uvh.device)  # dummy tensor
         splits = []
@@ -251,7 +314,6 @@ class GarmentNerf(nn.Module):
             # For batchfying
             uvh = uvh[:, 0, ...] if len(uvh.shape)==4 else uvh #todo for uvh and others
             sample_feat = [sample_feat_[:, 0, ...] for sample_feat_ in sample_feat]
-            # cbfeat_, idGfeat_, idCfeat_ = cbfeat_[:,0,...], idGfeat_[:,0,...], idCfeat_[:,0,...]
             smpl_param = smpl_param.expand(x.shape[0], x.shape[1], -1) if smpl_param is not None \
                 else torch.Tensor(0).to(uvh.device)
         else:
@@ -365,14 +427,20 @@ class NeusSegm(nn.Module):
             W_geo_feat = self.implicit_surface.W
         self.radiance_net = RadianceNet(
             W_geo_feat=W_geo_feat, **radiance_cfg)
-        self.segm_net = RadianceNet(
-            W_geo_feat=W_geo_feat, **segmentation_cfg)
-        cmap = colormap.get_cmap('jet', segmentation_cfg['output_dim'])
-        self.labels_cmap = torch.from_numpy(cmap(range(segmentation_cfg['output_dim']))[:, :3])
+        if segmentation_cfg is not None:
+            self.segm_net = RadianceNet(
+                W_geo_feat=W_geo_feat, **segmentation_cfg)
+            cmap = colormap.get_cmap('jet', segmentation_cfg['output_dim'])
+            self.labels_cmap = torch.from_numpy(cmap(range(segmentation_cfg['output_dim']))[:, :3])
+        else:
+            self.segm_net = None
+
         # -------- outside nerf++
         if use_outside_nerf:
+            enable_semantic = segmentation_cfg is not None
+            semantic_dim = segmentation_cfg['output_dim'] if enable_semantic else 0
             self.nerf_outside = NeRF(input_ch=4, multires=10, multires_view=4, use_view_dirs=True,
-                                     enable_semantic=True, num_semantic_classes=segmentation_cfg['output_dim'])
+                                     enable_semantic=True, num_semantic_classes=semantic_dim)
 
     def forward_radiance(self, x: torch.Tensor, view_dirs: torch.Tensor):
         _, nablas, geometry_feature = self.implicit_surface.forward_with_nablas(x)
@@ -596,9 +664,10 @@ def volume_render(
         radiances = batchify_query(model.forward_radiance, pts_mid,
                                    view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
                                    cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
-        logits = batchify_query(model.forward_segm, pts_mid,
-                                view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
-                                cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
+        if model.decoder.segm_net is not None:
+            logits = batchify_query(model.forward_segm, pts_mid,
+                                    view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
+                                    cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
         # ------------------
         # Outside Scene
         # ------------------
@@ -646,9 +715,10 @@ def volume_render(
             # [(B), N_ryas, N_pts-1 + N_outside, 3]
             radiances = torch.cat([radiance_in, radiance_out[..., N_pts_1:, :]], dim=-2)
 
-            logits_in = logits * mask_inside.float()[..., None] + logits_out[..., :N_pts_1, :] * (~mask_inside).float()[
-                ..., None]
-            logits = torch.cat([logits_in, logits_out[..., N_pts_1:, :]], dim=-2)
+            if model.decoder.segm_net is not None:
+                logits_in = logits * mask_inside.float()[..., None] + logits_out[..., :N_pts_1, :] * (~mask_inside).float()[
+                    ..., None]
+                logits = torch.cat([logits_in, logits_out[..., N_pts_1:, :]], dim=-2)
             d_final = d_vals_out
         else:
             alpha_in = opacity_alpha
@@ -666,10 +736,12 @@ def volume_render(
         depth_map = torch.sum(visibility_weights * d_final, -1)
         # NOTE: to get the correct depth map, the sum of weights must be 1!
         # depth_map = torch.sum(visibility_weights / (visibility_weights.sum(-1, keepdim=True)+1e-10) * d_final, -1)
-        logit_map = torch.sum(visibility_weights[..., None] * logits, -2)
-        # acc_map = torch.sum(visibility_weights, -1)
-        label_map = torch.argmax(F.softmax(logit_map, -1), -1)
-        label_map_color = model.decoder.labels_cmap[label_map]
+        if model.decoder.segm_net is not None:
+            logit_map = torch.sum(visibility_weights[..., None] * logits, -2)
+            # acc_map = torch.sum(visibility_weights, -1)
+            label_map = torch.argmax(F.softmax(logit_map, -1), -1)
+            label_map_color = model.decoder.labels_cmap[label_map]
+
 
         mask_weights = alpha_to_w(alpha_in)
         acc_map = torch.sum(mask_weights, -1)
@@ -681,8 +753,10 @@ def volume_render(
             ('depth_volume', depth_map),  # [(B), N_rays]
             # ('depth_surface', d_pred_out),    # [(B), N_rays]
             ('mask_volume', acc_map),  # [(B), N_rays]
-            ('logit', logit_map)  # [(B), N_rays, N_classes]
         ])
+
+        if model.decoder.segm_net is not None:
+            ret_i['logit'] = logit_map # [(B), N_rays, N_classes]
 
         if calc_normal:
             normals_map = F.normalize(nablas, dim=-1)
@@ -699,8 +773,9 @@ def volume_render(
             ret_i['visibility_weights'] = visibility_weights
             ret_i['d_final'] = d_final
             ret_i['sample_range'] = sample_range
-            ret_i['label_map'] = label_map
-            ret_i['label_map_color'] = label_map_color
+            if model.decoder.segm_net is not None:
+                ret_i['label_map'] = label_map
+                ret_i['label_map_color'] = label_map_color
 
         return ret_i
 
@@ -763,7 +838,7 @@ class Trainer(nn.Module):
         # mask = model_input['object_mask'].to(device)
         # bounding_box = model_input['bbox_mask'].to(device)
         self.model.mesh.update_vertices(vertices)
-        if args.model.input_type == 'tframe':
+        if args.model.input_type in ['tframe','directproj','dispproj']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in model_input['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in model_input['transformInfo'].items()}
@@ -810,7 +885,7 @@ class Trainer(nn.Module):
         # [B, N_rays]
         mask_volume: torch.Tensor = extras['mask_volume']
         # NOTE: when predicted mask is close to 1 but GT is 0, exploding gradient.
-        # swheo, Note: dueto binary cross entropy (log(0) = -inf) - exploding
+        # Note. swheo, : dueto binary cross entropy (log(0) = -inf) - exploding
         # mask_volume = torch.clamp(mask_volume, 1e-10, 1-1e-10)
         mask_volume = torch.clamp(mask_volume, 1e-3, 1 - 1e-3)
         extras['mask_volume_clipped'] = mask_volume
@@ -883,13 +958,14 @@ class Trainer(nn.Module):
         vertices = val_in['vertices'][0].to(device)
         self.model.mesh.update_vertices(vertices)
         # self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
-        if args.model.input_type == 'tframe':
+        if args.model.input_type in ['tframe','directproj','dispproj']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in val_in['transformInfo'].items()}
         B, H, W = val_in['object_mask'].shape
         mask = val_in['object_mask'].reshape(B, -1).to(device)
         # N_rays=-1 for rendering full image
+        # todo bbox based sampling to make volume rendering fast
         rays_o, rays_d, select_inds = rend_util.get_rays(
             c2w, intrinsics, H, W, N_rays=-1)
         target_rgb = val_gt['rgb'].to(device)
@@ -907,10 +983,18 @@ class Trainer(nn.Module):
             batched=render_kwargs_test['batched'])
         val_imgs = dict()
         val_imgs['val/gt_rgb'] = to_img(target_rgb)
-        val_imgs['val/gt_segm'] = to_img(self.model.decoder.labels_cmap[target_segm])
+        if 'label_map_color' in ret:
+            val_imgs['val/gt_segm'] = to_img(self.model.decoder.labels_cmap[target_segm])
         val_imgs['val/predicted_rgb'] = to_img(rgb)
+        #todo rearrange code!!
+        # val_imgs['scalar/psnr'] = torchmetrics.functional.peak_signal_noise_ratio(val_imgs['val/gt_rgb'],
+        #                                                                           val_imgs['val/predicted_rgb'], data_range=1.0)
+        # val_imgs['scalar/ssim'] = torchmetrics.functional.structural_similarity_index_measure(val_imgs['val/gt_rgb'].view(1, 3, 256, 256),
+        #                                                             val_imgs['val/predicted_rgb'].view(1, 3, 256, 256), data_range=1.0)
+        # val_imgs['scalar/mse'] =  torchmetrics.functional.mean_squared_error(val_imgs['val/gt_rgb'], val_imgs['val/predicted_rgb'])
         val_imgs['val/pred_depth_volume'] = to_img((depth_v / (depth_v.max() + 1e-10)).unsqueeze(-1))
         val_imgs['val/pred_mask_volume'] = to_img(ret['mask_volume'].unsqueeze(-1))
+        # val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(???, val_imgs['val/pred_mask_volume'], num_classes=???)
         if 'depth_surface' in ret:
             val_imgs['val/pred_depth_surface'] = to_img(
                 (ret['depth_surface'] / ret['depth_surface'].max()).unsqueeze(-1))
@@ -918,6 +1002,7 @@ class Trainer(nn.Module):
             val_imgs['val/predicted_mask'] = to_img(ret['mask_surface'].unsqueeze(-1).float())
         if 'label_map_color' in ret:
             val_imgs['val/predicted_segm'] = to_img(ret['label_map_color'])
+            # val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(???, ???, num_classes=???)
         if 'normals_volume' in ret:
             val_imgs['val/predicted_normals'] = to_img(ret['normals_volume'] / 2. + 0.5)
 
@@ -938,7 +1023,7 @@ class Trainer(nn.Module):
         vertices = val_in['vertices'].to(device)
         # vertices = self.model.tposeInfo['vertices'] #todo delete this later
         self.model.mesh.update_vertices(vertices)
-        if args.model.input_type == 'tframe':
+        if args.model.input_type in ['tframe','directproj','dispproj']:
             self.model.tposeInfo = {key: val.to(device) for key, val in val_in['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val.to(device) for key, val in val_in['transformInfo'].items()}
@@ -954,6 +1039,8 @@ class Trainer(nn.Module):
             def forward(self, x):
                 return self.surface_func(x)[0]
 
+        # todo enable bbox based acceleration
+
         implicit_surface = fooFunc(self.model)
         mesh_util.extract_mesh(
             implicit_surface,
@@ -968,15 +1055,12 @@ class Trainer(nn.Module):
             dataloader,
             render_kwargs_test: dict,
             device='cuda',
-            mesh_dir=None,
             it=1, num_iters=5000, lr=1.0e-4, batch_points=10000,
             logger=None):
         # --------------
         # pretrain sdf using IGR's framework
         # https://www.github.com/amosgropp/IGR
         # --------------
-
-        # todo : Add check whether it is pretrained
 
         from torch import optim
         sigma_global = args.model.decoder.obj_bounding_radius / 2.
@@ -996,24 +1080,17 @@ class Trainer(nn.Module):
             pbar.update(it)
             while it < num_iters:
                 for (indices, model_input, ground_truth) in dataloader:
-                    # intrinsics = val_in["intrinsics"].to(device)
-                    # c2w = val_in['c2w'].to(device)
-                    B, H, W = model_input['object_mask'].shape
-                    object_mask = model_input['object_mask'].reshape(B, -1)
                     cbuvmap = model_input['cbuvmap'].to(device)
                     idfeatmap = render_kwargs_test['idfeat_map_all'][model_input['subject_id'].item()][None].to(device) \
                         if render_kwargs_test['idfeat_map_all'] != None else None
                     smpl_param = model_input['smpl_params']['poses'][:, 0, :].to(
                         device) if args.data.smpl_feat != 'none' else None
-                    vertices = model_input['vertices'][0].to(device) #todo undo this later
-                    # vertices = model_input['tposeInfo']['vertices'][0].to(device)  # to check pose deviations
-                    if args.model.input_type == 'tframe':
+                    vertices = model_input['vertices'][0].to(device)
+                    if args.model.input_type in ['tframe','directproj','dispproj']:
                         self.model.tposeInfo = {key: val[0].to(device) for key, val in model_input['tposeInfo'].items()}
                         # vertices = self.model.tposeInfo['vertices'] # to check pose deviations
                     elif args.model.input_type == 'invskin':
                         self.model.transInfo = {key: val[0].to(device) for key, val in model_input['transformInfo'].items()}
-                        # self.model.transInfo['alignMat'] = torch.eye(4, device=device).expand_as(self.model.transInfo['alignMat'])
-                        # self.model.transInfo['A'] = torch.eye(4, device=device).expand_as(self.model.transInfo['A'])
 
                     # vertices = self.model.tposeInfo['vertices']
                     sample_inds = torch.randint(vertices.shape[0], (batch_points,), device=device)
@@ -1024,6 +1101,7 @@ class Trainer(nn.Module):
                     pts_out_glo = torch.rand(vertices.shape[0] // 2, 3, device=device) * (
                             sigma_global * 2) - sigma_global
                     pts_out = torch.cat([pts_out_loc, pts_out_glo], dim=0)
+                    # pts_out = torch.load('/ssd3/swheo/dev/code/neurecon/utils/pts_out.pt', map_location=pts_on.device) # todo tmp
                     self.model.mesh.update_vertices(vertices)
                     normals = self.model.mesh.vert_normal[sample_inds, :]
                     cbfeat, idGfeat, idCfeat, idSfeat = self.model.forward_featext(cbuvmap=cbuvmap, iduvmap=idfeatmap)
@@ -1050,6 +1128,9 @@ class Trainer(nn.Module):
 
                     optimizer.zero_grad()
                     loss.backward()
+                    grad_norms = train_util.calc_grad_norm(model=self.model)
+                    if grad_norms['total'] > 50:
+                        foo = 1
                     optimizer.step()
                     it += 1
                     if logger is not None:
@@ -1059,13 +1140,12 @@ class Trainer(nn.Module):
                         logger.add('pretrain_sdf', 'loss_norm', loss_norm.item(), it)
 
                     pbar.set_postfix(loss_total=loss.item(), loss_pts=loss_ptson.item(), loss_eik=loss_eik.item(),
-                                     loss_norm=loss_norm.item())
+                                     loss_norm=loss_norm.item(), grad_norm=grad_norms['total'])
                     pbar.update(1)
                     if it >= num_iters:
                         break
 
         return True, it
-
 
 def get_model(args):
     model_config = {
@@ -1074,6 +1154,7 @@ def get_model(args):
         'W_idG_feat': args.model.setdefault('W_idG_feat', 32),
         'W_idC_feat': args.model.setdefault('W_idC_feat', 32),
         'W_idS_feat': args.model.setdefault('W_idS_feat', 32),
+        'use_segm'  : args.model.setdefault('use_segm',True),
         'use_cbfeat': args.model.setdefault('use_cbfeat', True),
         'use_idfeat': args.model.setdefault('use_idfeat', True)
     }
@@ -1081,12 +1162,19 @@ def get_model(args):
 
     decoder_cfg = {
         'obj_bounding_radius': args.model.decoder.obj_bounding_radius,
-        'input_ch': args.model.decoder.setdefault('input_ch', 3),
+        # 'input_ch': args.model.decoder.setdefault('input_ch', 3),
         'W_geo_feat': args.model.decoder.setdefault('W_geometry_feature', 256),
         'use_outside_nerf': args.model.decoder.setdefault('use_outside_nerf', False),
         'speed_factor': args.training.setdefault('speed_factor', 1.0),
         'variance_init': args.model.decoder.setdefault('variance_init', 0.05)
     }
+
+    if model_config['input_type'] in ['directproj', 'dispproj']:# 'tframe'
+        decoder_cfg['input_ch'] = 4
+    elif model_config['input_type'] == 'tframe':
+        decoder_cfg['input_ch'] = 6
+    else:
+        decoder_cfg['input_ch'] = 3
 
     surface_cfg = {
         'embed_multires': args.model.decoder.surface.setdefault('embed_multires', 6),
@@ -1112,18 +1200,22 @@ def get_model(args):
         'input_feat': 0
     }
 
-    segmentation_cfg = {
-        'embed_multires': args.model.decoder.segmentation.setdefault('embed_multires', -1),
-        'embed_multires_view': args.model.decoder.segmentation.setdefault('embed_multires_view', -1),
-        'use_view_dirs': args.model.decoder.segmentation.setdefault('use_view_dirs', False),
-        'D': args.model.decoder.segmentation.setdefault('D', 5),
-        'W': args.model.decoder.segmentation.setdefault('W', 256),
-        'W_up': args.model.decoder.segmentation.setdefault('W_up', []),
-        'featcats': args.model.decoder.segmentation.setdefault('featcats', []),
-        'skips': args.model.decoder.segmentation.setdefault('skips', []),
-        'output_dim': args.model.decoder.segmentation.setdefault('output_dim', 4),
-        'input_feat': 0
-    }
+    if model_config['use_segm']:
+        segmentation_cfg = {
+            'embed_multires': args.model.decoder.segmentation.setdefault('embed_multires', -1),
+            'embed_multires_view': args.model.decoder.segmentation.setdefault('embed_multires_view', -1),
+            'use_view_dirs': args.model.decoder.segmentation.setdefault('use_view_dirs', False),
+            'D': args.model.decoder.segmentation.setdefault('D', 5),
+            'W': args.model.decoder.segmentation.setdefault('W', 256),
+            'W_up': args.model.decoder.segmentation.setdefault('W_up', []),
+            'featcats': args.model.decoder.segmentation.setdefault('featcats', []),
+            'skips': args.model.decoder.segmentation.setdefault('skips', []),
+            'output_dim': args.model.decoder.segmentation.setdefault('output_dim', 4),
+            'input_feat': 0
+        }
+    else:
+        segmentation_cfg = None
+
     if model_config['use_cbfeat']:
         cbfeat_cfg = {
             'layername': args.model.canonicalbody.setdefault('layername', 'UnetNoCond5DS'),
@@ -1141,7 +1233,8 @@ def get_model(args):
         input_feat_surface = 0
 
     radiance_cfg['input_dim_pts'] = decoder_cfg['input_ch']
-    segmentation_cfg['input_dim_pts'] = decoder_cfg['input_ch']
+    if segmentation_cfg is not None:
+        segmentation_cfg['input_dim_pts'] = decoder_cfg['input_ch']
 
     if model_config['use_idfeat']:
         idfeat_cfg = {
@@ -1162,7 +1255,8 @@ def get_model(args):
         input_feat_radiance = model_config['W_idC_feat']
         input_feat_segmentation = model_config['W_idS_feat']
         radiance_cfg['input_feat'] = input_feat_radiance
-        segmentation_cfg['input_feat'] = input_feat_segmentation
+        if segmentation_cfg is not None:
+            segmentation_cfg['input_feat'] = input_feat_segmentation
         model_config['idfeat_cfg'] = idfeat_cfg
     else:
         idfeat_map = None
