@@ -15,9 +15,11 @@ from typing import Optional
 from collections import OrderedDict
 
 import torch
+import torchmetrics
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import autograd
+from kornia.morphology import dilation
 
 import matplotlib.cm as colormap
 
@@ -964,11 +966,20 @@ class Trainer(nn.Module):
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in val_in['transformInfo'].items()}
         B, H, W = val_in['object_mask'].shape
-        mask = val_in['object_mask'].reshape(B, -1).to(device)
+        mask_ = dilation(val_in['object_mask'].unsqueeze(0).to(device), torch.ones(11,11).to(device),
+                         border_type='constant', border_value=0.)
+        mask = mask_.reshape(B, -1) > 0.
+
+        if not render_kwargs_test['maskonly']:
+            mask = None
+            # margin = 0.0
+            # bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
+            # mask = (rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W) > 0.).view(B, -1)
+
         # N_rays=-1 for rendering full image
         # todo bbox based sampling to make volume rendering fast
         rays_o, rays_d, select_inds = rend_util.get_rays(
-            c2w, intrinsics, H, W, N_rays=-1)
+            c2w, intrinsics, H, W, N_rays=-1, mask=mask)
         target_rgb = val_gt['rgb'].to(device)
         target_segm = val_gt['segm'].to(device)
         rgb, depth_v, ret = self.renderer(rays_o, rays_d, detailed_output=True,
@@ -986,26 +997,27 @@ class Trainer(nn.Module):
         val_imgs['val/gt_rgb'] = to_img(target_rgb)
         if 'label_map_color' in ret:
             val_imgs['val/gt_segm'] = to_img(self.model.decoder.labels_cmap[target_segm])
-        val_imgs['val/predicted_rgb'] = to_img(rgb)
+        val_imgs['val/predicted_rgb'] = to_img(rgb, mask=mask)
         #todo rearrange code!!
-        # val_imgs['scalar/psnr'] = torchmetrics.functional.peak_signal_noise_ratio(val_imgs['val/gt_rgb'],
-        #                                                                           val_imgs['val/predicted_rgb'], data_range=1.0)
-        # val_imgs['scalar/ssim'] = torchmetrics.functional.structural_similarity_index_measure(val_imgs['val/gt_rgb'].view(1, 3, 256, 256),
-        #                                                             val_imgs['val/predicted_rgb'].view(1, 3, 256, 256), data_range=1.0)
-        # val_imgs['scalar/mse'] =  torchmetrics.functional.mean_squared_error(val_imgs['val/gt_rgb'], val_imgs['val/predicted_rgb'])
-        val_imgs['val/pred_depth_volume'] = to_img((depth_v / (depth_v.max() + 1e-10)).unsqueeze(-1))
-        val_imgs['val/pred_mask_volume'] = to_img(ret['mask_volume'].unsqueeze(-1))
+        val_imgs['scalar/psnr'] = torchmetrics.functional.peak_signal_noise_ratio(val_imgs['val/gt_rgb'],
+                                                                                  val_imgs['val/predicted_rgb'], data_range=1.0)
+        val_imgs['scalar/ssim'] = torchmetrics.functional.structural_similarity_index_measure(val_imgs['val/gt_rgb'], val_imgs['val/predicted_rgb'], data_range=1.0)
+        val_imgs['scalar/mse'] = torchmetrics.functional.mean_squared_error(val_imgs['val/gt_rgb'], val_imgs['val/predicted_rgb'])
+        val_imgs['val/pred_depth_volume'] = to_img((depth_v / (depth_v.max() + 1e-10)).unsqueeze(-1), mask=mask)
+        val_imgs['val/pred_mask_volume'] = to_img(ret['mask_volume'].unsqueeze(-1), mask=mask)
         # val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(???, val_imgs['val/pred_mask_volume'], num_classes=???)
         if 'depth_surface' in ret:
             val_imgs['val/pred_depth_surface'] = to_img(
-                (ret['depth_surface'] / ret['depth_surface'].max()).unsqueeze(-1))
+                (ret['depth_surface'] / ret['depth_surface'].max()).unsqueeze(-1), mask=mask)
         if 'mask_surface' in ret:
-            val_imgs['val/predicted_mask'] = to_img(ret['mask_surface'].unsqueeze(-1).float())
+            val_imgs['val/predicted_mask'] = to_img(ret['mask_surface'].unsqueeze(-1).float(), mask=mask)
         if 'label_map_color' in ret:
-            val_imgs['val/predicted_segm'] = to_img(ret['label_map_color'])
-            # val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(???, ???, num_classes=???)
+            val_imgs['val/predicted_segm'] = to_img(ret['label_map_color'], mask=mask)
+            label_map_pred = to_img(ret['label_map'].unsqueeze(-1), mask=mask)
+            label_map_gt = to_img(target_segm.unsqueeze(-1))
+            val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(label_map_pred, label_map_gt, num_classes=self.model.decoder.labels_cmap.shape[0])
         if 'normals_volume' in ret:
-            val_imgs['val/predicted_normals'] = to_img(ret['normals_volume'] / 2. + 0.5)
+            val_imgs['val/predicted_normals'] = to_img(ret['normals_volume'] / 2. + 0.5, mask=mask)
 
         return val_imgs
 
@@ -1298,6 +1310,7 @@ def get_model(args):
     render_kwargs_test = copy.deepcopy(render_kwargs_train)
     render_kwargs_test['idfeat_map_all'] = idfeat_map
     render_kwargs_test['rayschunk'] = args.data.val_rayschunk
+    render_kwargs_test['maskonly'] = args.data.val_rendermaskonly
     render_kwargs_test['perturb'] = False
 
     trainer = Trainer(model, device_ids=args.device_ids, batched=render_kwargs_train['batched'])
