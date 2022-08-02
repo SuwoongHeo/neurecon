@@ -1056,7 +1056,9 @@ class Trainer(nn.Module):
             render_kwargs_test: dict,
             device='cuda',
             it=1, num_iters=5000, lr=1.0e-4, batch_points=10000,
-            logger=None):
+            logger=None,
+            **kwargs, #reserved
+    ):
         # --------------
         # pretrain sdf using IGR's framework
         # https://www.github.com/amosgropp/IGR
