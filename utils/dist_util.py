@@ -19,7 +19,7 @@ def init_env(args):
             slurm_initialize('nccl', port=args.port)
         else:
             #--------- for torch.distributed.launch
-            dist.init_process_group(backend='nccl', timeout=datetime.timedelta(seconds=3600)) #To get longer timeout 1hour
+            dist.init_process_group(backend='nccl', timeout=datetime.timedelta(seconds=6000)) #To get longer timeout 1hour
 
         rank = int(os.environ['RANK'])
         local_rank = int(os.environ['LOCAL_RANK'])

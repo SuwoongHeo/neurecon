@@ -63,8 +63,12 @@ class SceneDataset(torch.utils.data.Dataset):
             self.subjects_data[subject]['cam_file'] = cam_file
 
             assert select_frame in ['uniform', 'random'], 'only uniform or random frame selections are supproted'
-            frame_inds = np.arange(0, frame_max, int(frame_max/num_frame))[:num_frame] if select_frame=='uniform' else \
-                np.random.randint(0, frame_max)[:num_frame]
+            if num_frame>0:
+                frame_inds = np.arange(0, frame_max, int(frame_max/num_frame))[:num_frame] if select_frame=='uniform' else \
+                    np.random.randint(0, frame_max)[:num_frame]
+            else:
+                # For the case that want to use only single selected frame
+                frame_inds = [-num_frame-1]
             image_paths = [image_paths[ind] for ind in frame_inds]
             mask_paths = [mask_paths[ind] for ind in frame_inds]
 
@@ -152,7 +156,9 @@ class SceneDataset(torch.utils.data.Dataset):
             mesh.update_vertices(vertices_tposed[0])
             self.subjects_data[subject]['tposeInfo'] = {'vertices': vertices_tposed[0], 'B': mesh.triangles[:,0],
                                                         'E0': mesh.edges[:,0], 'E1': -mesh.edges[:,1],
-                                                        'tanframe': mesh.faces_tanframe}
+                                                        'tanframe': mesh.faces_tanframe,
+                                                        'tanframe_inv': mesh.faces_tanframe.transpose(-1, -2)}
+                                                        #'tanframe_inv':torch.linalg.inv(mesh.faces_tanframe)}
             self.subjects_data[subject]['Acan_inv'] = torch.from_numpy(np.linalg.inv(transforms_world))
 
         uvmask = torch.from_numpy(load_rgb(os.path.join(asset_dir, 'smpl', smpl_type, 'smpl_uv.png'),
