@@ -14,7 +14,7 @@ def convert_sigma_samples_to_ply(
     input_3d_sigma_array: np.ndarray,
     voxel_grid_origin,
     volume_size,
-    ply_filename_out,
+    ply_filename_out=None,
     level=5.0,
     offset=None,
     scale=None,):
@@ -75,12 +75,13 @@ def convert_sigma_samples_to_ply(
     el_verts = plyfile.PlyElement.describe(verts_tuple, "vertex")
     el_faces = plyfile.PlyElement.describe(faces_tuple, "face")
 
-    ply_data = plyfile.PlyData([el_verts, el_faces])
-    log.info("saving mesh to %s" % str(ply_filename_out))
-    ply_data.write(ply_filename_out)
+    if ply_filename_out is not None:
+        ply_data = plyfile.PlyData([el_verts, el_faces])
+        log.info("saving mesh to %s" % str(ply_filename_out))
+        ply_data.write(ply_filename_out)
 
     log.info(
-        "converting to ply format and writing to file took {} s".format(
+        "marching cube took {} s".format(
             time.time() - start_time
         )
     )
@@ -117,7 +118,17 @@ def extract_mesh(implicit_surface, volume_size=2.0, level=0.0, N=512, filepath='
 
     out = batchify(implicit_surface.forward, xyz)
     out = out.reshape([N, N, N])
-    verts, faces = convert_sigma_samples_to_ply(out, voxel_grid_origin, [float(v) / N for v in volume_size], filepath, level=level)
+    verts, faces = convert_sigma_samples_to_ply(out, voxel_grid_origin, [float(v) / N for v in volume_size], None, level=level)
+
+    el_verts = plyfile.PlyElement.describe(verts, "vertex")
+    el_faces = plyfile.PlyElement.describe(faces, "face")
+
+    ply_data = plyfile.PlyData([el_verts, el_faces])
+    log.info("saving mesh to %s" % str(filepath))
+    ply_data.write(filepath)
+
+    #todo enable color extraction
+
     return verts, faces
 
 def extract_mesh_nerfpp(nerfpp, volume_size=2.0, level=50.0, N=512, obj_bounding_radius=1.0, filepath='./surface.ply', show_progress=True, chunk=16*1024):
