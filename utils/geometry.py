@@ -38,10 +38,10 @@ class Mesh(object):
         self.vertices = vertices
         # Compute face related attributes
         # self.faces_normal, self.faces_area, self.edges = computeFaceNormal(self.vertices, self.faces)
-        self.vert_normal, self.faces_normal, self.faces_area, self.edges = computeNormals(self.vertices, self.faces)
+        self.vert_normal, self.faces_normal, self.faces_area, self.edges = computeNormals(self.vertices, self.faces, stability_scale=stability_scale)
         self.triangles = self.vertices[self.faces]
         self.faces_center = self.triangles.mean(dim=-2)
-        self.faces_framerot = computeFrameRot(self.faces_normal)
+        # self.faces_framerot = computeFrameRot(self.faces_normal)
         self.faces_tanframe = computeTangentFrame(self.faces_normal, self.edges[:,0,:].squeeze()) # Use fixed axis
         ## Compute vars for point to mesh projection
         self.project_func = ProjectMesh2Point(self)
@@ -218,21 +218,11 @@ def computeNormals(v, f):
 
     # Uniform normals
     v_norm = T.zeros_like(v)
-    v_norm = v_norm.index_add(0, f.reshape(-1), f_norm.repeat(1, 3).reshape(-1, 3))
+    v_norm = v_norm.index_add(0, f.reshape(-1), v_cross.repeat(1, 3).reshape(-1, 3))
     v_norm = v_norm/T.linalg.norm(v_norm, dim=-1).unsqueeze(-1)
 
     return v_norm, f_norm, v_cross_norm, edges
 
-def computeFaceNormal(v, f):
-    tri = v[f]
-    edges = T.stack([tri[:,1,:] - tri[:,0,:],
-                    tri[:,0,:] - tri[:,2,:],
-                    tri[:,2,:] - tri[:,1,:]], dim=-1).transpose(-2,-1)
-    # |p1-p0| x |p2-p0|
-    v_cross = T.cross(edges[:,0,:], -edges[:,1,:])
-    v_cross_norm = T.sqrt(T.sum(v_cross**2, dim=1))
-
-    return v_cross/v_cross_norm[...,None], v_cross_norm, edges
 def computeTangentFrame(vn, b_X=None):
     """
     Modified from https://github.com/nmwsharp/diffuion-net/src/geometry.py#L151
@@ -262,19 +252,23 @@ def computeTangentFrame(vn, b_X=None):
 
     return frames
 
-def computeFrameRot(normal):
-    # Todo, modify frame computation and mapping refering diffusionnet
-    """
-    Modified from diffusionnet, https://github.com/nmwsharp/diffusion-net
-
-    """
-    # R @ normal = z
-    z = T.tensor([0.,0.,1.], dtype=T.float32, device=normal.device).expand_as(normal)
-    a = T.cross(normal, z)
-    a = a / T.linalg.norm(a, dim=-1).unsqueeze(-1)
-    b = T.cross(normal, a)
-    b = b / T.linalg.norm(b, dim=-1).unsqueeze(-1)
-    R = T.stack([normal, a, b], dim=-2)
+# def computeFrameRot(normal):
+#     """
+#     Modified from diffusionnet, https://github.com/nmwsharp/diffusion-net
+#
+#     """
+#     # R @ normal = z
+#     z = T.tensor([0.,0.,1.], dtype=T.float32, device=normal.device).expand_as(normal)
+#     a = T.cross(normal, z)
+#     a = a / T.linalg.norm(a, dim=-1).unsqueeze(-1)
+#     b = T.cross(normal, a)
+#     b = b / T.linalg.norm(b, dim=-1).unsqueeze(-1)
+#     R = T.stack([normal, a, b], dim=-2)
+#
+#     # degeneracy check
+#     assert T.linalg.norm(a, dim=-1).min()>0, 'computeFrameRot has error, need degeneracy check'
+#
+#     return R
 
     # degeneracy check
     assert T.linalg.norm(a, dim=-1).min()>0, 'computeFrameRot has error, need degeneracy check'
