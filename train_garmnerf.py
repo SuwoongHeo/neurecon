@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def main_function(args):
-    args.update({'device_ids': [7]})  # Temporary
+    args.update({'device_ids': [1]})  # Temporary
     init_env(args)
 
     # ----------------------------
@@ -169,13 +169,22 @@ def main_function(args):
                     # validate
                     # -------------------
                     if i_val > 0 and int_it % i_val == 0:
+                        scalars = {}
                         with torch.no_grad():
                             for idx, (val_ind, val_in, val_gt) in enumerate(valloader):
                                 val_imgs = trainer.module.val(args, val_in, val_gt, render_kwargs_test, device=device) \
                                     if isinstance(trainer, torch.nn.parallel.distributed.DistributedDataParallel) else \
                                     trainer.val(args, val_in, val_gt, render_kwargs_test, device=device)
-                                for name, img in val_imgs.items():
-                                    logger.add_imgs(img, name, it, prefix=val_in['tag'][0], monitor=idx == 0)
+                                for name, value in val_imgs.items():
+                                    if 'val/' in name:
+                                        logger.add_imgs(value, name, it, prefix=val_in['tag'][0], monitor=idx == 0)
+                                    elif 'scalar/' in name:
+                                        if name in scalars.keys():
+                                            scalars[name].append(value.data.cpu().numpy().item())
+                                        else:
+                                            scalars[name] = [value.data.cpu().numpy().item()]
+                                for name, value in scalars.items():
+                                    logger.add('eval', name, sum(value)/len(value), it)
 
                     # -------------------
                     # validate mesh
