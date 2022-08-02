@@ -252,7 +252,8 @@ class GarmentNerf(nn.Module):
                                                   torch.cat([(1 - torch.sum(st, -1)).unsqueeze(-1), st], dim=-1)
                                                   , self.mesh.vert_normal[self.mesh.faces][idxs]).unsqueeze(-1)
             x_diff = x - vnear
-            x_dists = torch.norm(x_diff, dim=-1).unsqueeze(-1)
+            # x_dists = torch.norm(x_diff, dim=-1).unsqueeze(-1)
+            x_dists = torch.sqrt(torch.sum(x_diff ** 2, -1) + 1e-12).unsqueeze(-1)
 
             uvh = torch.cat([vnear_tpose, x_dists * x_sign], dim=-1)
             # debug
