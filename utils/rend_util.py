@@ -191,6 +191,10 @@ def get_rays(c2w, intrinsics, H, W, N_rays=-1, jittered=False, mask=None):
         j = torch.gather(j, -1, select_inds)
     else:
         select_inds = torch.arange(H*W).to(device).expand([*prefix, H*W])
+        if mask is not None:
+            select_inds = select_inds[mask].view([*prefix, mask.sum()])
+            i = i[mask].view([*prefix, mask.sum()])
+            j = j[mask].view([*prefix, mask.sum()])
 
     pixel_points_cam = lift(i, j, torch.ones_like(i).to(device), intrinsics=intrinsics)
 
@@ -358,17 +362,25 @@ def get_ptsoutside_from_radius(ray_origins: torch.Tensor, ray_directions: torch.
     sqrt = torch.sqrt(under_sqrt)
 
 
-def lin2img(tensor: torch.Tensor, H: int, W: int, batched=False, B=None):
+def lin2img(tensor: torch.Tensor, H: int, W: int, batched=False, B=None, mask=None):
     *_, num_samples, channels = tensor.shape
-    assert num_samples == H * W
+    if mask is not None:
+        assert num_samples == mask.sum()
+        tensor_ = torch.zeros((mask.shape[0], H * W, channels), dtype=tensor.dtype).to(tensor.device)
+        tensor_[mask, :] = tensor
+        num_samples = H*W
+    else:
+        assert num_samples == H * W
+        tensor_ = tensor
+
     if batched:
         if B is None:
-            B = tensor.shape[0]
+            B = tensor_.shape[0]
         else:
-            tensor = tensor.view([B, num_samples//B, channels])
-        return tensor.permute(0, 2, 1).view([B, channels, H, W])
+            tensor_ = tensor_.view([B, num_samples // B, channels])
+        return tensor_.permute(0, 2, 1).view([B, channels, H, W])
     else:
-        return tensor.permute(1, 0).view([channels, H, W])
+        return tensor_.permute(1, 0).view([channels, H, W])
 
 
 #----------------------------------------------------
