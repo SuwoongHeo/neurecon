@@ -204,7 +204,7 @@ def create_pseudo_mask(images_dir, write_to):
         out[mask,:] = 1
         mpimg.imsave(os.path.join(write_to, name + ".png"), out)
 
-def process_colmap(colmap_dir, write_to, images_dir, mask_dir):
+def process_colmap(colmap_dir, write_to, images_dir, mask_dir, write_yml=True):
     camerasfile = os.path.join(colmap_dir, 'sparse/cameras.bin')
     camdata = read_model.read_cameras_binary(camerasfile)
     imagesfile = os.path.join(colmap_dir, 'sparse/images.bin')
@@ -218,6 +218,7 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir):
     os.makedirs(os.path.join(procssed_dir, 'mask'), exist_ok=True)
     os.makedirs(os.path.join(procssed_dir, 'semantic'), exist_ok=True)
     os.makedirs(os.path.join(procssed_dir, 'reproj'), exist_ok=True)
+
     cam_dict = dict()
 
     bottom = np.array([0, 0, 0, 1.]).reshape([1, 4])
@@ -239,6 +240,12 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir):
     for pt in ptdata:
         ptsall.append(ptdata[pt].xyz)
     ptsall = np.array(ptsall)
+
+    if write_yml:
+        intri = cv2.FileStorage(os.path.join(procssed_dir, 'intri.yml'), cv2.FILE_STORAGE_WRITE)
+        extri = cv2.FileStorage(os.path.join(procssed_dir, 'extri.yml'), cv2.FILE_STORAGE_WRITE)
+        intri.write('names', sorted(names))
+        extri.write('names', sorted(names))
 
     for i, k in enumerate(permkeys):
         im = imdata[k]
@@ -295,6 +302,12 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir):
         R = im.qvec2rotmat()
         t = im.tvec.reshape([3, 1])
         m = K@np.concatenate([R, t], 1)
+        if write_yml:
+            intri.write(f'K_{names[k]}', K)
+            intri.write(f'dist_{names[k]}', _ if len(_)>0 else np.zeros((5,1)))
+            extri.write(f'Rot_{names[k]}', R)
+            extri.write(f'R_{names[k]}', cv2.Rodrigues(R)[0])
+            extri.write(f'T_{names[k]}', t)
         # Debug
         if True:
             pts_ = []
@@ -329,6 +342,9 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir):
     # must switch to [-u, r, -t] from [r, -u, t], NOT [r, u, -t] (No need to)
     #
     np.savez(write_to, **cam_dict)
+    if write_yml:
+        intri.release()
+        extri.release()
 
 def map_intrinsic_models(model_name, params):
     K = np.zeros((3,3))
@@ -422,8 +438,8 @@ if __name__ == "__main__":
     # "We used the known camera poses to shift the coordinate system, locating the object at the origin." ...
     # "We further apply a global scale of 3/R_max*1.1 to place all camera centers inside a sphere of radius 3 ... (DTU.py)
     # source_dir = "/ssd2/swheo/db/DTU/scan65"
-    source_dir = "../data/zju_test"
+    source_dir = "../data/jmg_cellphone"
     use_linear_init = False
     get_normalization(source_dir, use_linear_init)
 
-    print('Done!')
+    print('Done')
