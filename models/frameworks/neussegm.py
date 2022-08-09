@@ -97,14 +97,20 @@ class NeuSSegm(nn.Module):
             W_geo_feat = self.implicit_surface.W
         self.radiance_net = RadianceNet(
             W_geo_feat=W_geo_feat, **radiance_cfg)
-        self.segm_net = RadianceNet(
-            W_geo_feat=W_geo_feat, **segmentation_cfg)
-        cmap = colormap.get_cmap('jet', segmentation_cfg['output_dim'])
-        self.labels_cmap = torch.from_numpy(cmap(range(segmentation_cfg['output_dim']))[:, :3])
-        #-------- outside nerf++
+        if segmentation_cfg is not None:
+            self.segm_net = RadianceNet(
+                W_geo_feat=W_geo_feat, **segmentation_cfg)
+            cmap = colormap.get_cmap('jet', segmentation_cfg['output_dim'])
+            self.labels_cmap = torch.from_numpy(cmap(range(segmentation_cfg['output_dim']))[:, :3])
+        else:
+            self.segm_net = None
+
+        # -------- outside nerf++
         if use_outside_nerf:
+            enable_semantic = segmentation_cfg is not None
+            semantic_dim = segmentation_cfg['output_dim'] if enable_semantic else 0
             self.nerf_outside = NeRF(input_ch=4, multires=10, multires_view=4, use_view_dirs=True,
-                                     enable_semantic=True, num_semantic_classes=segmentation_cfg['output_dim'])
+                                     enable_semantic=True, num_semantic_classes=semantic_dim)
 
     def forward_radiance(self, x: torch.Tensor, view_dirs: torch.Tensor):
         _, nablas, geometry_feature = self.implicit_surface.forward_with_nablas(x)
@@ -118,7 +124,6 @@ class NeuSSegm(nn.Module):
 
     def forward_s(self):
         return torch.exp(self.ln_s * self.speed_factor)
-
 
     def forward(self, x: torch.Tensor, view_dirs: torch.Tensor):
         sdf, nablas, geometry_feature = self.implicit_surface.forward_with_nablas(x)
