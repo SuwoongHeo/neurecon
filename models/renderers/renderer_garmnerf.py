@@ -93,7 +93,7 @@ def volume_render(
         # rays_d: [(B), N_rays, 3]
 
         # [(B), N_rays] x 2
-        if True: #bounding_box is None: #todo use this if near far are not provided given near far if
+        if bounding_box is None: #todo use this if near far are not provided given near far if
             near, far = rend_util.near_far_from_sphere(rays_o, rays_d, r=obj_bounding_radius)
         else:
             near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)

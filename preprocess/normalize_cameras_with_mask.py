@@ -242,10 +242,11 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir, write_yml=True):
     ptsall = np.array(ptsall)
 
     if write_yml:
+        names_ = [f"{i+1:02d}" for i in range(len(names))]
         intri = cv2.FileStorage(os.path.join(procssed_dir, 'intri.yml'), cv2.FILE_STORAGE_WRITE)
         extri = cv2.FileStorage(os.path.join(procssed_dir, 'extri.yml'), cv2.FILE_STORAGE_WRITE)
-        intri.write('names', sorted(names))
-        extri.write('names', sorted(names))
+        intri.write('names', sorted(names_))
+        extri.write('names', sorted(names_))
 
     for i, k in enumerate(permkeys):
         im = imdata[k]
@@ -303,11 +304,11 @@ def process_colmap(colmap_dir, write_to, images_dir, mask_dir, write_yml=True):
         t = im.tvec.reshape([3, 1])
         m = K@np.concatenate([R, t], 1)
         if write_yml:
-            intri.write(f'K_{names[k]}', K)
-            intri.write(f'dist_{names[k]}', _ if len(_)>0 else np.zeros((5,1)))
-            extri.write(f'Rot_{names[k]}', R)
-            extri.write(f'R_{names[k]}', cv2.Rodrigues(R)[0])
-            extri.write(f'T_{names[k]}', t)
+            intri.write(f'K_{names_[i]}', K)
+            intri.write(f'dist_{names_[i]}', _ if len(_)>0 else np.zeros((1,5)))
+            extri.write(f'Rot_{names_[i]}', R)
+            extri.write(f'R_{names_[i]}', cv2.Rodrigues(R)[0])
+            extri.write(f'T_{names_[i]}', t)
         # Debug
         if True:
             pts_ = []
@@ -438,7 +439,7 @@ if __name__ == "__main__":
     # "We used the known camera poses to shift the coordinate system, locating the object at the origin." ...
     # "We further apply a global scale of 3/R_max*1.1 to place all camera centers inside a sphere of radius 3 ... (DTU.py)
     # source_dir = "/ssd2/swheo/db/DTU/scan65"
-    source_dir = "../data/jmg_cellphone"
+    source_dir = "../data/jungwoo_wmask"
     use_linear_init = False
     get_normalization(source_dir, use_linear_init)
 

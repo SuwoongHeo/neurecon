@@ -279,13 +279,15 @@ def near_far_from_bbox(ray_origins: torch.Tensor, ray_directions: torch.Tensor, 
     """
     NOTE: Using AABB Alogrithm to find interections,
     modified from https://github.com/zju3dv/neuralbody/blob/master/lib/utils/if_nerf/if_nerf_data_utils.py
+    check the article in https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-box-intersection
     ray_origins: camera center's coordinate
     ray_directions: camera rays' directions. already normalized.
     """
     # ray_directions[(ray_directions < 1e-5) & (ray_directions > -1e-10)] = 1e-5
     # ray_directions[(ray_directions > -1e-5) & (ray_directions < 1e-10)] = -1e-5
-    t_min = (bounds[:1].expand_as(ray_origins) - margin - ray_origins) / (ray_directions + 1e-6)
-    t_max = (bounds[1:2].expand_as(ray_origins) + margin - ray_origins) / (ray_directions + 1e-6)
+    invdir = 1. / ray_directions
+    t_min = (bounds[:1].expand_as(ray_origins) - margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
+    t_max = (bounds[1:2].expand_as(ray_origins) + margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
     t1 = torch.minimum(t_min, t_max)
     t2 = torch.maximum(t_min, t_max)
     near = torch.max(t1, dim=-1, keepdim=True)[0]
