@@ -150,6 +150,7 @@ class GarmentNerf(nn.Module):
         :param cbfeat : canonical body uvmap feature, [B, ch, H, W]
         :param idGfeat : identity uvmap feature, [B, self.W_idG_feat, H, W]
         :param idCfeat : identity uvmap feature, [B, self.W_idC_feat, H, W]
+        :param idSfeat : identity uvmap feature, [B, self.W_idC_feat, H, W]
         :param smpl_param : smpl_parameter(Not decided to use shape or poses) [B, N_params]
         """
         ## Compute uvh (uv loc / signed distance from surface) No..
@@ -237,17 +238,18 @@ class GarmentNerf(nn.Module):
             vnear_tpose = self.tposeInfo['B'][idxs_] + \
                           st_[..., 0].unsqueeze(-1) * self.tposeInfo['E0'][idxs_] + \
                           st_[..., 1].unsqueeze(-1) * self.tposeInfo['E1'][idxs_]
-
+            st = st_
+            idxs = idxs_
             uvh = torch.cat([vnear_tpose, h], dim=-1)
 
             # debug
             # from dataio.MviewTemporalSMPL import plotly_viscorres3D
             # numpts = 5
-            # plotly_viscorres3D(self.mesh.vertices.detach().cpu(), self.mesh.faces.detach().cpu(),
+            # plotly_viscorres3D(vertices=self.mesh.vertices.detach().cpu(), faces=self.mesh.faces.detach().cpu(),
             #                    query=x[..., :numpts, :].detach().cpu(),
             #                    vnear=vnear_[..., :numpts, :].detach().cpu(), pp_color=vnear[..., :numpts, :].detach().cpu(),
             #                    faces_tanframe=None)
-            # plotly_viscorres3D(self.tposeInfo['vertices'].detach().cpu(), self.mesh.faces.detach().cpu(),
+            # plotly_viscorres3D(vertices=self.tposeInfo['vertices'].detach().cpu(), faces=self.mesh.faces.detach().cpu(),
             #                    query=x[..., :numpts, :].detach().cpu(),
             #                    vnear=vnear_tpose[..., :numpts, :].detach().cpu(), pp_color=vnear[..., :numpts, :].detach().cpu(),
             #                    faces_tanframe=None)
@@ -265,7 +267,6 @@ class GarmentNerf(nn.Module):
                 splits.append(feat.shape[1])
         sample_feat = list(sample_feature_volume_uv(uv_, aggrfeat,
                                                     splits=splits)) if len(splits) > 0 else []
-
         if len(x.shape) < 4:
             # For batchfying
             uvh = uvh[:, 0, ...] if len(uvh.shape)==4 else uvh #todo for uvh and others
