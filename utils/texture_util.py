@@ -11,7 +11,10 @@ from pytorch3d.renderer import (
     TexturesUV,
     TexturesVertex,
     MeshRenderer,
+    DirectionalLights,
+    HardPhongShader
 )
+from pytorch3d.utils import cameras_from_opencv_projection
 from pytorch3d import _C
 
 class BlendParams:
@@ -147,6 +150,70 @@ def barycentric_coordinates_(p, v0, v1, v2):
     w1 = edge_function(p, v2, v0) / area
     w2 = edge_function(p, v0, v1) / area
     return (w0, w1, w2)
+
+def create_renderer_camera(intr, extr, H, W, device=None):
+    """
+    intr Bx4x4 or Bx3x3
+    extr Bx4x4 or Bx3x4
+    """
+    if device is None:
+        device = extr.device
+    R = extr[:, :3]
+    tvec = extr[:, 3]
+    camera = cameras_from_opencv_projection(R=R, tvec=tvec,
+                                            camera_matrix=intr,
+                                            image_size=T.as_tensor([[H, W]],
+                                            device=device)).to(device)
+    return camera
+
+def create_mesh_renderer(intr, extr, H, W, device=None):
+    if device is None:
+        device = extr.device
+    raster_settings = RasterizationSettings(
+        image_size=(H,W), blur_radius=0.0, faces_per_pixel=1
+    )
+    camera = create_renderer_camera(intr, extr, H, W)
+    # To see camera direction
+    lights = DirectionalLights(device=device,
+                              direction=(-extr[...,:3].transpose(-1,-2)@extr[...,3,None])[...,0],
+                              diffuse_color = ((0.5, 0.5, 0.5),), ambient_color = ((0.3, 0.3, 0.3),))
+
+    return MeshRenderer(
+        rasterizer=MeshRasterizer(
+            cameras=camera, raster_settings=raster_settings
+        ),
+        shader=HardPhongShader(device=device, cameras=camera,
+                               lights=lights, blend_params=BlendParams())
+    )
+
+def render_mesh(renderer, verts, faces, cameras=None, verts_color=None, device=None, **kwargs):
+    """
+    verts : BxNx3
+    faces : BxFx3
+    """
+    if device is None:
+        device = cameras.device
+
+    if verts_color is None:
+        verts_color = T.ones_like(verts).to(device)
+
+    textures = TexturesVertex(verts_features=verts_color)
+    mesh = Meshes(verts=verts.to(device), faces =faces.to(device), textures=textures)
+
+    if cameras is None:
+        img = renderer(mesh)
+    else:
+        extr = kwargs.get("extr")
+        intr = kwargs.get("intr")
+        H = kwargs.get("H")
+        W = kwargs.get("W")
+        cameras = create_renderer_camera(intr=intr, extr=extr, H=H, W=W, device=device)
+        lights = DirectionalLights(device=device,
+                                   direction=(-extr[..., :3].transpose(-1, -2) @ extr[..., 3, None])[..., 0],
+                                   diffuse_color=((0.5, 0.5, 0.5),), ambient_color=((0.3, 0.3, 0.3),))
+        img = renderer(mesh, cameras=cameras, lights=lights)
+
+    return img
 
 if __name__=="__main__":
     device = T.device("cuda:5")
