@@ -132,3 +132,15 @@ def grid_sample(image, optical):
                se_val.view(N, C, H, W) * se.view(N, 1, H, W))
 
     return out_val
+
+def add_batch_dim(in_dict, dim=0, B=1):
+    out = dict()
+    for key, val in in_dict.items():
+        if isinstance(val, torch.Tensor):
+            out[key] = torch.stack([val]*B, dim=dim)
+        elif isinstance(val, dict):
+            out[key] = add_batch_dim(val, dim=dim, B=B)
+        else:
+            out[key] = val
+
+    return out

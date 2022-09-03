@@ -3,15 +3,19 @@ import argparse
 import torch
 import math
 import numpy as np
+import open3d as o3d
 
 from utils.print_fn import log
-from utils import io_util, rend_util
+from utils import io_util, rend_util, train_util
 from utils.checkpoints import sorted_ckpts
+from utils.dist_util import init_env
 from models.frameworks import get_model
 
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Slerp
+
+from tqdm import tqdm
 
 def normalize(vec, axis=-1):
     return vec / (np.linalg.norm(vec, axis=axis, keepdims=True) + 1e-9)
@@ -74,7 +78,7 @@ def c2w_track_spiral(c2ws, num_views=10):
     up = c2ws[:, :3, 1].sum(0)
     rads = np.percentile(np.abs(c2ws[:, :3, 3]), 30, 0)
     focus_distance = np.mean(np.linalg.norm(c2ws[:, :3, 3], axis=-1))
-    return c2w_track_spiral(c2w_center, up, rads, focus_distance * 0.8, zrate=0.0, rots=1, N=num_views)
+    return c2w_track_spiral_internal(c2w_center, up, rads, focus_distance * 0.8, zrate=0.0, rots=1, N=num_views)
 
 def c2w_track_spiral_internal(c2w, up_vec, rads, focus: float, zrate: float, rots: int, N: int, zdelta: float = 0.):
     # TODO: support zdelta
@@ -209,14 +213,14 @@ def c2w_track_interpolation(c2ws, num_views, **kwargs):
 
     return render_c2ws
 
-def c2w_track_greatcircle(c2ws, view01=[11,15], **kwargs):
+def c2w_track_greatcircle(c2ws, view_ids=[11,15], **kwargs):
     # ------------------
     # Great Circle Path:
     #   assume two input views are on a great circle, then interpolate along this great circle
     # ------------------
     # to interpolate along a great circle that pass through the c2w center of view0 and view1
-    assert len(view01) == 2, 'please select two views on a great circle, in CCW order (from above)'
-    view0, view1 = view01[0], view01[1]
+    assert len(view_ids) == 2, 'please select two views on a great circle, in CCW order (from above)'
+    view0, view1 = view_ids[0], view_ids[1]
     c0 = c2ws[view0, :3, 3]
     c0_norm = np.linalg.norm(c0)
     c1 = c2ws[view1, :3, 3]
@@ -262,37 +266,59 @@ def get_camerapath(mode, c2ws, **kwargs):
     # view_ids = view_ids.split(',')
     # view_ids = [int(v) for v in view_ids]
     if mode == 'spiral':
-        # Need num_views
+        # c2w_track_spiral(c2ws, num_views=10), need debug
         render_c2ws = c2w_track_spiral(c2ws, **kwargs)
     elif mode == 'spherical_spiral':
-        # Need view_ids, debug?
+        # c2w_track_sphericalspiral(c2ws, view_ids=[1,11,15], **kwargs), need debug
         render_c2ws = c2w_track_sphericalspiral(c2ws, **kwargs)
     elif mode == 'small_circle':
-        # Need view_ids, debug?
+        # c2w_track_smallcircle(c2ws, view_ids=[1,11,15], **kwargs), need debug
         render_c2ws = c2w_track_smallcircle(c2ws, **kwargs)
     elif mode == 'interpolation':
-        # Need num_views
+        # c2w_track_interpolation(c2ws, num_views, **kwargs), need debug
         render_c2ws = c2w_track_interpolation(c2ws, **kwargs)
     elif mode == 'great_circle':
-        # Need view01
+        # c2w_track_greatcircle(c2ws, view01=[11,15], **kwargs), need debug
         render_c2ws = c2w_track_greatcircle(c2ws, **kwargs)
     elif mode == 'camviews':
-        render_c2ws = 1
+        render_c2ws = c2ws
     else:
         raise RuntimeError(
-            "Please choose render type between [spiral, interpolation, small_circle, great_circle, spherical_spiral]")
+            "Please choose render type between [spiral, interpolation, small_circle, great_circle, spherical_spiral,camviews]")
 
     return render_c2ws
 
-def main_funciton(args, write_to):
+def simplify_mesh_o3d(meshdir, target_num_face=60000):
+    geometry = o3d.io.read_triangle_mesh(meshdir)
+    geometry.compute_vertex_normals()
+    dec_mesh = geometry.simplify_quadric_decimation(target_num_face)
+    dec_mesh.remove_degenerate_triangles()
+    dec_mesh.remove_duplicated_triangles()
+    dec_mesh.remove_duplicated_vertices()
+    dec_mesh.remove_non_manifold_edges()
+    # Overwrite
+    o3d.io.write_triangle_mesh(meshdir, dec_mesh)
+
+def main_function(args):
     """
     Implemented Camera Paths
     spiral, interpolation, small_circle, great_circle, spherical_spiral
     """
-    io_util.cond_mkdir(write_to)
+    args.update({'device_ids': [3], 'ddp': False})  # todo
+    device = args.device
+    init_env(args)
+
+    rootdir = os.path.join(args.training.exp_dir, 'run', args.run.root)
+    io_util.cond_mkdir(rootdir)
+    if args.run.visualize.render_mesh:
+        meshroot = os.path.join(rootdir, 'meshes')
+        io_util.cond_mkdir(meshroot)
+
+    args.data.update(args.run.data)
 
     model, trainer, render_kwargs_train, render_kwargs_test, render_fn = get_model(args)
-    if args.load_pt is None:
+
+    if len(args.run.ckpt) == 0:
         # automatically load 'final_xxx.pt' or 'latest.pt'
         ckpt_file = sorted_ckpts(os.path.join(args.training.exp_dir, 'ckpts'))[-1]
     else:
@@ -300,61 +326,129 @@ def main_funciton(args, write_to):
 
     ## Load Model
     log.info("=> Use ckpt:" + str(ckpt_file))
-    state_dict = torch.load(ckpt_file, map_location=args.device)
+    state_dict = torch.load(ckpt_file, map_location=device)
     model.load_state_dict(state_dict['model'])
-    model.to(args.device)
+    model.to(device)
 
     ## Load Data
     from dataio import get_data
-    dataset = get_data(args, downscale=args.downscale)
-    subjectdata = dataset.subjects_data[args.subjectid]
+    dataset = get_data(args)
+    subjectdata = dataset.subjects_data[args.run.subject_id]
     c2ws = subjectdata['c2w_all']
     intrinsics = subjectdata['intrinsics_all']
+    frame_inds = subjectdata['frame_inds']
 
     ## Compute specified camera paths
-    log.info("=> Camera path: {}".format(args.camera_path))
-    campath_kwargs = {'numviews':args.visualization.numviews, 'view_ids':args.visualization.view_ids, 'view01':args.visualization.view01,
-                      'debug':args.debug, 'intrinsics':intrinsics}
-    render_c2ws = get_camerapath(args.camera_path, c2ws, **campath_kwargs)
+    camera_path = args.run.visualize.camera_path
+    log.info("=> Camera path: {}".format(camera_path))
+    campath_kwargs = {'numviews':args.run.visualize.numviews, 'view_ids':args.run.visualize.view_ids,
+                      'debug':args.run.visualize.debug, 'intrinsics':intrinsics}
+    render_c2ws = get_camerapath(camera_path, c2ws, **campath_kwargs)
 
-    rgb_imgs = []
-    depth_imgs = []
-    normal_imgs = []
-    # save mesh render images
-    mesh_imgs = []
-    render_kwargs_test['rayschunk'] = args.visualization.rayschunk
+    vis_root = os.path.join(rootdir, 'vis_views') if camera_path == 'camviews' \
+        else os.path.join(rootdir, 'vis_frames')
+    render_kwargs_test['maskonly'] = True if camera_path == 'camviews' else False
 
-    do_render_mesh = args.mesh_path is not None
-    if do_render_mesh:
-        import open3d as o3d
-        log.info("=> Load mesh: {}".format(args.render_mesh))
-        geometry = o3d.io.read_triangle_mesh(args.render_mesh)
-        geometry.compute_vertex_normals()
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(width=W, height=H, visible=args.debug)
-        ctrl = vis.get_view_control()
-        vis.add_geometry(geometry)
-        cam = ctrl.convert_to_pinhole_camera_parameters()
-        intr = intrinsics.data.cpu().numpy()
-        # cam.intrinsic.set_intrinsics(W, H, intr[0,0], intr[1,1], intr[0,2], intr[1,2])
-        cam.intrinsic.set_intrinsics(W, H, intr[0,0], intr[1,1], W/2-0.5, H/2-0.5)
-        ctrl.convert_from_pinhole_camera_parameters(cam)
+    for frame_ind in tqdm(frame_inds, desc='frames...'):
+        data_inds = sorted([ind for ind in range(len(dataset.rgb_images)) if str(frame_ind) in dataset.rgb_images[ind].split('/')[-1]])
+        _, data, gt = dataset.__getitem__(data_inds[0])
+        H, W = data['object_mask'].shape
+        data_str = f'{frame_ind:06d}'
+        if args.run.visualize.render_mesh:
+            meshdir = os.path.join(meshroot, f'{data_str}.ply')
+            if not os.path.isfile(meshdir):
+                log.info("=> Write mesh: {}".format(meshdir))
+                trainer.val_mesh(args, data, meshdir, render_kwargs_test=render_kwargs_test, device=device)
+                # Decimate the mesh
+                simplify_mesh_o3d(meshdir, target_num_face=60000)
+
+            log.info("=> Load mesh: {}".format(meshdir))
+            geometry = o3d.io.read_triangle_mesh(meshdir)
+            geometry.compute_vertex_normals()
+            vis = o3d.visualization.rendering.OffscreenRenderer(width=W, height=H)
+            grey = o3d.visualization.rendering.MaterialRecord()
+            grey.base_color = [0.75, 0.75, 0.75, 1.0]
+            grey.shader = 'defaultLit'
+            vis.scene.add_geometry("mesh", geometry, grey)
+            # vis = o3d.visualization.Visualizer()
+            # vis.create_window(width=W, height=H, visible=False)
+            # vis.add_geometry(geometry)
+
+        if camera_path != 'camviews':
+            # Add batch dimension to the data
+            data = train_util.add_batch_dim(data, dim=0, B=1)
+            vis_dir = os.path.join(vis_root, data_str)
+            io_util.cond_mkdir(vis_dir)
+
+
+        for cind, c2w in enumerate(tqdm(render_c2ws, desc='views...')):
+            if camera_path == 'camviews':
+                _, data, gt = dataset.__getitem__(data_inds[cind])
+                vis_dir = os.path.join(vis_root, f'{cind:02d}')
+                io_util.cond_mkdir(vis_dir)
+            else:
+                data['c2w'] = c2w #todo check this
+
+            imgs = trainer.val(args, data, gt, render_kwargs_test, device=device)
+            out = {'rgb':imgs['val/predicted_rgb'].detach(),
+                   'segm':imgs['val/predicted_segm'].detach(),
+                   'normal':imgs['val/predicted_normals'].detach(),
+                   'depth':imgs['val/pred_depth_volume'].detach()}
+
+            if args.run.visualize.render_mesh:
+                #todo modify by using this code
+                #https://github.com/pablospe/render_depthmap_example
+                ctrl = vis.get_view_control()
+                param = o3d.camera.PinholeCameraParameters()
+                intr = data['intrinsics'].cpu().numpy().copy()
+                extr = np.linalg.inv(c2w)
+                param.intrinsic = o3d.camera.PinholeCameraIntrinsic()
+                param.intrinsic.intrinsic_matrix = intr[:3, :3]
+                param.extrinsic = extr
+                vis.setup_camera(param.intrinsic, param.extrinsic)
+                ctrl.convert_from_pinhole_camera_parameters(param, allow_arbitrary=True)
+                vis.poll_events()
+                vis.update_renderer()
+                rgb_mesh = np.array(vis.capture_screen_float_buffer(do_render=True))
+                out['mesh_overlay'] = rgb_mesh
+
+            foo = 1
+
+    # do_render_mesh = args.mesh_path is not None
+    # if do_render_mesh:
+    #     import open3d as o3d
+    #     log.info("=> Load mesh: {}".format(args.render_mesh))
+    #     geometry = o3d.io.read_triangle_mesh(args.render_mesh)
+    #     geometry.compute_vertex_normals()
+    #     vis = o3d.visualization.Visualizer()
+    #     vis.create_window(width=W, height=H, visible=args.debug)
+    #     ctrl = vis.get_view_control()
+    #     vis.add_geometry(geometry)
+    #     cam = ctrl.convert_to_pinhole_camera_parameters()
+    #     intr = intrinsics.data.cpu().numpy()
+    #     # cam.intrinsic.set_intrinsics(W, H, intr[0,0], intr[1,1], intr[0,2], intr[1,2])
+    #     cam.intrinsic.set_intrinsics(W, H, intr[0,0], intr[1,1], W/2-0.5, H/2-0.5)
+    #     ctrl.convert_from_pinhole_camera_parameters(cam)
 
 
 if __name__ == "__main__":
     # parser = io_util.create_args_parser()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='../config_test/neus_nomask.yaml', help='Path to config file.')
+    parser.add_argument('--runconfig', type=str, default='../config_test/garmnerf_run.yaml', help='Path to config file.')
+    parser.add_argument('--config', type=str, default=None, help='Just for match to protocol.')
     parser.add_argument('--resume_dir', type=str, default=None, help='Just for match to protocol.')
-    parser.add_argument("--mesh_path", type=str, default=None, help='the mesh ply file to be rendered')
     parser.add_argument("--device", type=str, default='cuda', help='render device')
-    parser.add_argument("--downscale", type=float, default=4)
-    parser.add_argument("--rayschunk", type=int, default=1048)
-    parser.add_argument("--subjectid", type=int, default=363)
-    parser.add_argument("--num_views", type=int, default=200)
-    parser.add_argument("--debug", action='store_true', help='Whether enable debuging camera path', default=False)
-    ##
-    parser.add_argument("--mesh_file", type=str, default="../logs/neusseg_nomask_jungwoo_exp_b_7/meshes/00300000.ply")
-    parser.add_argument("--sphere_radius", type=float, default=3.0)
-    parser.add_argument("--backface",action='store_true', help='render show back face')
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    config = io_util.load_config(args, unknown)
+    main_function(config)
+
+    # parser.add_argument("--mesh_path", type=str, default=None, help='the mesh ply file to be rendered')
+    # parser.add_argument("--rayschunk", type=int, default=1048)
+    # parser.add_argument("--subjectid", type=int, default=363)
+    # parser.add_argument("--num_views", type=int, default=200)
+    # parser.add_argument("--debug", action='store_true', help='Whether enable debuging camera path', default=False)
+    # ##
+    # parser.add_argument("--mesh_file", type=str, default="../logs/neusseg_nomask_jungwoo_exp_b_7/meshes/00300000.ply")
+    # parser.add_argument("--sphere_radius", type=float, default=3.0)
+    # parser.add_argument("--backface",action='store_true', help='render show back face')
+    # args = parser.parse_args()

@@ -194,7 +194,7 @@ class Trainer(nn.Module):
             c2w, intrinsics, H, W, N_rays=-1, mask=mask)
         target_rgb = val_gt['rgb'].to(device)
         target_segm = val_gt['segm'].to(device)
-        rgb, depth_v, ret = self.renderer(rays_o, rays_d, detailed_output=True,
+        rgb, depth_v, ret = self.renderer(rays_o, rays_d, detailed_output=False,
                                           calc_normal=True,
                                           cbfeat_map=cbuvmap,
                                           idfeat_map=idfeatmap,

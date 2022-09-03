@@ -329,6 +329,8 @@ def volume_render(
 
         if model.decoder.segm_net is not None:
             ret_i['logit'] = logit_map # [(B), N_rays, N_classes]
+            ret_i['label_map'] = label_map
+            ret_i['label_map_color'] = label_map_color
 
         if calc_normal:
             normals_map = F.normalize(nablas, dim=-1)
@@ -345,9 +347,6 @@ def volume_render(
             ret_i['visibility_weights'] = visibility_weights
             ret_i['d_final'] = d_final
             ret_i['sample_range'] = sample_range
-            if model.decoder.segm_net is not None:
-                ret_i['label_map'] = label_map
-                ret_i['label_map_color'] = label_map_color
 
         return ret_i
 
