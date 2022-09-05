@@ -1,0 +1,26 @@
+exp_dir: '/ssd2/swheo/dev/code/neurecon/logs/garmnerf_masksegm_exp_p_b_1'
+
+run:
+  root: 'test'
+  subject_id: '363'
+  ckpt: ''
+  data:
+    subjects: ['363']
+    downscale: 1
+    start_frame: 0
+    end_frame: 10
+    num_frame: 10
+    train_views: []
+    val_rayschunk: 2048
+    val_rendermaskonly: True
+
+  visualize:
+    camera_path: 'camviews' #'spiral', 'spherical_spiral', small_circle', interpolation', 'great_circle', 'camviews'
+    numviews: -1 #todo debug
+    view_ids: -1 #todo debug
+    render_mesh: True
+    debug: False
+
+
+  eval:
+    foo: 1

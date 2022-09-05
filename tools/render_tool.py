@@ -9,6 +9,7 @@ from utils.print_fn import log
 from utils import io_util, rend_util, train_util
 from utils.checkpoints import sorted_ckpts
 from utils.dist_util import init_env
+from utils.texture_util import create_renderer_camera, create_mesh_renderer, render_mesh
 from models.frameworks import get_model
 
 from scipy.spatial.transform import Rotation as R
@@ -16,6 +17,8 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Slerp
 
 from tqdm import tqdm
+
+from torchvision.utils import save_image
 
 def normalize(vec, axis=-1):
     return vec / (np.linalg.norm(vec, axis=axis, keepdims=True) + 1e-9)
@@ -304,13 +307,14 @@ def main_function(args):
     Implemented Camera Paths
     spiral, interpolation, small_circle, great_circle, spherical_spiral
     """
-    args.update({'device_ids': [3], 'ddp': False})  # todo
+    args.update({'device_ids': [7], 'ddp': False})  # todo
     device = args.device
     init_env(args)
 
     rootdir = os.path.join(args.training.exp_dir, 'run', args.run.root)
     io_util.cond_mkdir(rootdir)
     if args.run.visualize.render_mesh:
+        from pytorch3d.io import load_ply
         meshroot = os.path.join(rootdir, 'meshes')
         io_util.cond_mkdir(meshroot)
 
@@ -348,71 +352,91 @@ def main_function(args):
     vis_root = os.path.join(rootdir, 'vis_views') if camera_path == 'camviews' \
         else os.path.join(rootdir, 'vis_frames')
     render_kwargs_test['maskonly'] = True if camera_path == 'camviews' else False
-
-    for frame_ind in tqdm(frame_inds, desc='frames...'):
-        data_inds = sorted([ind for ind in range(len(dataset.rgb_images)) if str(frame_ind) in dataset.rgb_images[ind].split('/')[-1]])
-        _, data, gt = dataset.__getitem__(data_inds[0])
-        H, W = data['object_mask'].shape
-        data_str = f'{frame_ind:06d}'
-        if args.run.visualize.render_mesh:
-            meshdir = os.path.join(meshroot, f'{data_str}.ply')
-            if not os.path.isfile(meshdir):
-                log.info("=> Write mesh: {}".format(meshdir))
-                trainer.val_mesh(args, data, meshdir, render_kwargs_test=render_kwargs_test, device=device)
-                # Decimate the mesh
-                simplify_mesh_o3d(meshdir, target_num_face=60000)
-
-            log.info("=> Load mesh: {}".format(meshdir))
-            geometry = o3d.io.read_triangle_mesh(meshdir)
-            geometry.compute_vertex_normals()
-            vis = o3d.visualization.rendering.OffscreenRenderer(width=W, height=H)
-            grey = o3d.visualization.rendering.MaterialRecord()
-            grey.base_color = [0.75, 0.75, 0.75, 1.0]
-            grey.shader = 'defaultLit'
-            vis.scene.add_geometry("mesh", geometry, grey)
-            # vis = o3d.visualization.Visualizer()
-            # vis.create_window(width=W, height=H, visible=False)
-            # vis.add_geometry(geometry)
-
-        if camera_path != 'camviews':
-            # Add batch dimension to the data
-            data = train_util.add_batch_dim(data, dim=0, B=1)
-            vis_dir = os.path.join(vis_root, data_str)
-            io_util.cond_mkdir(vis_dir)
-
-
-        for cind, c2w in enumerate(tqdm(render_c2ws, desc='views...')):
-            if camera_path == 'camviews':
-                _, data, gt = dataset.__getitem__(data_inds[cind])
-                vis_dir = os.path.join(vis_root, f'{cind:02d}')
-                io_util.cond_mkdir(vis_dir)
-            else:
-                data['c2w'] = c2w #todo check this
-
-            imgs = trainer.val(args, data, gt, render_kwargs_test, device=device)
-            out = {'rgb':imgs['val/predicted_rgb'].detach(),
-                   'segm':imgs['val/predicted_segm'].detach(),
-                   'normal':imgs['val/predicted_normals'].detach(),
-                   'depth':imgs['val/pred_depth_volume'].detach()}
-
+    with torch.no_grad():
+        for frame_ind in tqdm(frame_inds, desc='frames...'):
+            data_inds = sorted([ind for ind in range(len(dataset.rgb_images)) if str(frame_ind) in dataset.rgb_images[ind].split('/')[-1]])
+            _, data, gt = dataset.__getitem__(data_inds[0])
+            H, W = data['object_mask'].shape
+            data_str = f'{frame_ind:06d}'
             if args.run.visualize.render_mesh:
-                #todo modify by using this code
-                #https://github.com/pablospe/render_depthmap_example
-                ctrl = vis.get_view_control()
-                param = o3d.camera.PinholeCameraParameters()
-                intr = data['intrinsics'].cpu().numpy().copy()
-                extr = np.linalg.inv(c2w)
-                param.intrinsic = o3d.camera.PinholeCameraIntrinsic()
-                param.intrinsic.intrinsic_matrix = intr[:3, :3]
-                param.extrinsic = extr
-                vis.setup_camera(param.intrinsic, param.extrinsic)
-                ctrl.convert_from_pinhole_camera_parameters(param, allow_arbitrary=True)
-                vis.poll_events()
-                vis.update_renderer()
-                rgb_mesh = np.array(vis.capture_screen_float_buffer(do_render=True))
-                out['mesh_overlay'] = rgb_mesh
+                meshdir = os.path.join(meshroot, f'{data_str}.ply')
+                if not os.path.isfile(meshdir):
+                    log.info("=> Write mesh: {}".format(meshdir))
+                    trainer.val_mesh(args, data, meshdir, render_kwargs_test=render_kwargs_test, device=device)
+                    # Decimate the mesh
+                    simplify_mesh_o3d(meshdir, target_num_face=60000)
 
-            foo = 1
+                log.info("=> Load mesh: {}".format(meshdir))
+                verts, faces = load_ply(meshdir)
+                intr = data['intrinsics'][None]
+                extr = torch.linalg.inv(c2ws[0])[None]
+                mesh_renderer = create_mesh_renderer(intr=intr, extr=extr, H=H, W=W, device=device)
+                verts = verts[None]
+                faces = faces[None]
+                # Note. open3d OffscreenRenderer requires OpenGL version 4.x> which is not compatible with this server setup
+                # geometry = o3d.io.read_triangle_mesh(meshdir)
+                # geometry.compute_vertex_normals()
+                # vis = o3d.visualization.rendering.OffscreenRenderer(width=W, height=H)
+                # grey = o3d.visualization.rendering.MaterialRecord()
+                # grey.base_color = [0.75, 0.75, 0.75, 1.0]
+                # grey.shader = 'defaultLit'
+                # vis.scene.add_geometry("mesh", geometry, grey)
+                # vis = o3d.visualization.Visualizer()
+                # vis.create_window(width=W, height=H, visible=False)
+                # vis.add_geometry(geometry)
+
+            if camera_path != 'camviews':
+                # Add batch dimension to the data
+                vis_dir = os.path.join(vis_root, data_str)
+                io_util.cond_mkdir(vis_dir)
+
+
+            for cind, c2w in enumerate(tqdm(render_c2ws, desc='views...')):
+                if camera_path == 'camviews':
+                    _, data, gt = dataset.__getitem__(data_inds[cind])
+                    vis_dir = os.path.join(vis_root, f'{cind:02d}')
+                    io_util.cond_mkdir(vis_dir)
+                else:
+                    data['c2w'] = c2w #todo check this
+                data = train_util.add_batch_dim(data, dim=0, B=1)
+                gt = train_util.add_batch_dim(gt, dim=0, B=1)
+
+                imgs = trainer.val(args, data, gt, render_kwargs_test, device=device)
+                out = {'rgb':imgs['val/predicted_rgb'].detach(),
+                       'segm':imgs['val/predicted_segm'].detach(),
+                       'normal':imgs['val/predicted_normals'].detach(),
+                       'depth':imgs['val/pred_depth_volume'].detach()}
+
+                if args.run.visualize.render_mesh:
+                    intr = data['intrinsics']
+                    extr = torch.linalg.inv(data['c2w'])
+                    mesh_overlay = render_mesh(renderer=mesh_renderer, verts=verts, faces=faces, intr=intr, extr=extr, H=H,
+                                               W=W, device=device)
+                    out['mesh_overlay'] = mesh_overlay[...,:3].permute(0,3,1,2)
+
+                    # #todo modify by using this code
+                    # #https://github.com/pablospe/render_depthmap_example
+                    # ctrl = vis.get_view_control()
+                    # param = o3d.camera.PinholeCameraParameters()
+                    # intr = data['intrinsics'].cpu().numpy().copy()
+                    # extr = np.linalg.inv(c2w)
+                    # param.intrinsic = o3d.camera.PinholeCameraIntrinsic()
+                    # param.intrinsic.intrinsic_matrix = intr[:3, :3]
+                    # param.extrinsic = extr
+                    # vis.setup_camera(param.intrinsic, param.extrinsic)
+                    # ctrl.convert_from_pinhole_camera_parameters(param, allow_arbitrary=True)
+                    # vis.poll_events()
+                    # vis.update_renderer()
+                    # rgb_mesh = np.array(vis.capture_screen_float_buffer(do_render=True))
+                    # out['mesh_overlay'] = rgb_mesh
+                for name, img in out.items():
+                    io_util.cond_mkdir(os.path.join(vis_dir, name))
+                    write_to = os.path.join(vis_dir, name, f'{frame_ind:06d}.jpg') if camera_path == 'camviews' \
+                        else os.path.join(vis_dir, name, f'{cind:03d}.jpg')
+                    save_image(img, write_to)
+
+
+                foo = 1
 
     # do_render_mesh = args.mesh_path is not None
     # if do_render_mesh:

@@ -31,7 +31,9 @@ class SceneDataset(torch.utils.data.Dataset):
                  subjects=[],
                  scale_radius=-1,
                  uv_size=256,
-                 num_frame=150,
+                 start_frame=0,
+                 end_frame=-1,
+                 num_frame=-1,
                  select_frame='uniform',
                  views=[],
                  smpl_type='smpl',
@@ -55,7 +57,7 @@ class SceneDataset(torch.utils.data.Dataset):
             self.subjects_data[subject]['subject_id'] = i
             image_dir = f'{self.instance_dir}/{subject}/images'
             image_paths = get_img_paths(image_dir)
-            frame_max = len(image_paths)
+            frame_max = len(image_paths) if end_frame == -1 else end_frame
             mask_dir = f'{self.instance_dir}/{subject}/masks'
             mask_paths = get_img_paths(mask_dir)
 
@@ -63,12 +65,15 @@ class SceneDataset(torch.utils.data.Dataset):
             self.subjects_data[subject]['cam_file'] = cam_file
 
             assert select_frame in ['uniform', 'random'], 'only uniform or random frame selections are supproted'
-            if num_frame>0:
-                frame_inds = np.arange(0, frame_max, int(frame_max/num_frame))[:num_frame] if select_frame=='uniform' else \
-                    np.random.randint(0, frame_max)[:num_frame]
-            else:
-                # For the case that want to use only single selected frame
-                frame_inds = [-num_frame-1]
+            frame_interval = max(int((start_frame - frame_max + 1) / num_frame), 1)
+            frame_inds = np.arange(start_frame, frame_max, frame_interval)[
+                         :num_frame] if select_frame == 'uniform' else \
+                np.sort(np.random.choice(np.arange(start_frame, frame_max), size=max(num_frame, 1), replace=False))
+            print(f"Subject {subject}, start_fram {frame_inds[0]}, end_frame {frame_inds[-1]}")
+            print(f"uniform samples, frame_interval {frame_interval}") if select_frame == 'uniform' else \
+                print(f"random samples, num_samples {num_frame} ")
+            self.subjects_data[subject]['frame_inds'] = frame_inds
+
             image_paths = [image_paths[ind] for ind in frame_inds]
             mask_paths = [mask_paths[ind] for ind in frame_inds]
 

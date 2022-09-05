@@ -158,10 +158,10 @@ def create_renderer_camera(intr, extr, H, W, device=None):
     """
     if device is None:
         device = extr.device
-    R = extr[:, :3]
-    tvec = extr[:, 3]
+    R = extr[..., :3, :3]
+    tvec = extr[..., :3, 3]
     camera = cameras_from_opencv_projection(R=R, tvec=tvec,
-                                            camera_matrix=intr,
+                                            camera_matrix=intr[..., :3, :3],
                                             image_size=T.as_tensor([[H, W]],
                                             device=device)).to(device)
     return camera
@@ -172,7 +172,7 @@ def create_mesh_renderer(intr, extr, H, W, device=None):
     raster_settings = RasterizationSettings(
         image_size=(H,W), blur_radius=0.0, faces_per_pixel=1
     )
-    camera = create_renderer_camera(intr, extr, H, W)
+    camera = create_renderer_camera(intr, extr, H, W).to(device)
     # To see camera direction
     lights = DirectionalLights(device=device,
                               direction=(-extr[...,:3].transpose(-1,-2)@extr[...,3,None])[...,0],
@@ -200,11 +200,13 @@ def render_mesh(renderer, verts, faces, cameras=None, verts_color=None, device=N
     textures = TexturesVertex(verts_features=verts_color)
     mesh = Meshes(verts=verts.to(device), faces =faces.to(device), textures=textures)
 
-    if cameras is None:
+    if (cameras is None) and (not kwargs):
         img = renderer(mesh)
+    elif (cameras is not None) and (not kwargs):
+        img = renderer(mesh, cameras=cameras)
     else:
-        extr = kwargs.get("extr")
-        intr = kwargs.get("intr")
+        extr = kwargs.get("extr").to(device)
+        intr = kwargs.get("intr").to(device)
         H = kwargs.get("H")
         W = kwargs.get("W")
         cameras = create_renderer_camera(intr=intr, extr=extr, H=H, W=W, device=device)

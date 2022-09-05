@@ -302,7 +302,7 @@ def load_config(args, unknown, base_config_path=None):
     ''' overwrite seq
     command line param --over--> args.config --over--> default config yaml
     '''
-    assert (args.config is not None) != (args.resume_dir is not None), "you must specify ONLY one in 'config' or 'resume_dir' "
+    # assert (args.config is not None) != (args.resume_dir is not None), "you must specify ONLY one in 'config' or 'resume_dir' "
 
     # NOTE: '--local_rank=xx' is automatically given by torch.distributed.launch (if used)
     #       BUT: pytorch suggest to use os.environ['LOCAL_RANK'] instead, and --local_rank=xxx will be deprecated in the future.
@@ -317,7 +317,7 @@ def load_config(args, unknown, base_config_path=None):
 
     print("=> Parse extra configs: ", unknown)
     if args.resume_dir is not None:
-        assert args.config is None, "given --config will not be used when given --resume_dir"
+        # assert args.config is None, "given --config will not be used when given --resume_dir"
         assert '--expname' not in unknown, "given --expname with --resume_dir will lead to unexpected behavior."
         #---------------
         # if loading from a dir, do not use base.yaml as the default; 
@@ -331,6 +331,14 @@ def load_config(args, unknown, base_config_path=None):
         # use the loading directory as the experiment path
         config.training.exp_dir = args.resume_dir
         print("=> Loading previous experiments in: {}".format(config.training.exp_dir))
+    elif hasattr(args, 'runconfig'):
+        # assert not hasattr(args, 'config'), "Specify only one of --runconfig or --config"
+        run_config = load_yaml(args.runconfig)
+        print("=> Loading experiments in: {}".format(run_config.exp_dir))
+        config_path = os.path.join(run_config.exp_dir, 'config.yaml')
+        config = load_yaml(config_path)
+        config.training.exp_dir = run_config.pop('exp_dir')
+        config.update(run_config)
     else:
         #---------------
         # if loading from a config file
