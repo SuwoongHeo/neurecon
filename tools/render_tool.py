@@ -352,6 +352,8 @@ def main_function(args):
     vis_root = os.path.join(rootdir, 'vis_views') if camera_path == 'camviews' \
         else os.path.join(rootdir, 'vis_frames')
     render_kwargs_test['maskonly'] = True if camera_path == 'camviews' else False
+    render_kwargs_test['idfeat_map_all'] = state_dict['idfeat'] if 'idfeat' in state_dict.keys() \
+        else render_kwargs_test['idfeat_map_all']
     with torch.no_grad():
         for frame_ind in tqdm(frame_inds, desc='frames...'):
             data_inds = sorted([ind for ind in range(len(dataset.rgb_images)) if str(frame_ind) in dataset.rgb_images[ind].split('/')[-1]])
