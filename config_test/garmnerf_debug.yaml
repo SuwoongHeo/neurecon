@@ -1,4 +1,4 @@
-expname: garmnerf_debug #garmnerf_masksegm_exp_p_a_dirproj_mine
+expname: garmnerf_debug #garmnerf_debug #garmnerf_masksegm_exp_p_a_dirproj_mine
 
 # device_ids: [0]     # single gpu           ; run on specified GPU
 # device_ids: [1, 0]  # DP                   ; run on specified GPU
@@ -7,7 +7,7 @@ device_ids: -1        # single GPU / DP / DDP; run on all available GPUs;
 data:
   type: 'MviewTemporalSMPL'
   batch_size: 1       # one batch, one image
-  data_dir: /ssd3/swheo/db/ZJU_MOCAP/LightStage
+  data_dir: /ssd2/swheo/db/ZJU_MOCAP/LightStage
   #cam_file: 'cameras.npz'
   subjects: ['363']
   train_views: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
@@ -17,12 +17,16 @@ data:
   pin_memory: True
 #  num_workers: 4
   N_rays: 512          # 512 N_rays for training
-  val_rayschunk: 2048  # 2048 N_rays for validation
-  val_downscale: 2     # downscale image for validation
+  val_rayschunk: 2048 #2048  # 2048 N_rays for validation
+  val_downscale: 1     # downscale image for validation
+  val_rendermaskonly: True # To use provided mask for validation image
 
   scale_radius: 3.0   # scale the dataset's all camera to be within this radius
   select_frame: 'uniform' # 'uniform' : uniform interval, 'rand' : randomly choose
-  num_frame: -878 #1 #300      # maximum number of frames to be used #default 150
+  start_frame: 878
+  end_frame: -1
+  num_frame: 1
+  # num_frame: -878 #1 #300      # maximum number of frames to be used #default 150
 
   smpl_type: 'smpl'
   uv_size: 128 #128
@@ -30,7 +34,7 @@ data:
 
 model:
   framework: GarmentNerf
-  input_type: 'dispproj' #'xyz', 'uvh', 'tframe', 'invskin', 'directproj', 'dispproj'
+  input_type: 'dispproj' #'xyz', 'uvh', 'tframe', 'invskin', 'directproj', 'dispproj', 'disptframe'
   W_idG_feat: 0 #32
   W_idC_feat: 0 #32
   W_idS_feat: 0 #32
@@ -58,7 +62,7 @@ model:
       W_up: []
       skips: [4]
       featcats: [4]
-      radius_init: 0.5
+      radius_init: 0.0 #0.5
       embed_multires: 6 #6
 
     radiance:
@@ -70,7 +74,7 @@ model:
       embed_multires_view: 4  # as in the NeuS official implementaion
 
     segmentation:
-      D: 3 # Use less depth than radiance
+      D: 5 #3 Use less depth than radiance
       W: 256
       W_up: []# [0,1]
       skips: []
@@ -96,7 +100,7 @@ training:
 
   speed_factor: 10.0    # NOTE: unexpectedly, this is very important. setting to 1.0 will cause some of the DTU instances can not converge correctly.
   jittered: True        # Jittered ray sampling using uniform distribution
-  sample_maskonly: False
+  sample_maskonly: True
   # neus
   with_mask: True
   w_eikonal: 0.1 #0.1
@@ -126,3 +130,18 @@ training:
 
   i_val: 500
   i_val_mesh: 10000
+
+run:
+  root: 'test'
+  sbuject_id: ['363']
+  visualize:
+    start_frame: 878
+    end_frame: -1
+    num_frame: 1
+    rayschunk: 2048
+    camera_path: 'camviews' #'spiral', 'spherical_spiral', small_circle', interpolation', 'great_circle', 'camviews'
+    render_mesh: True
+
+
+  eval:
+    foo: 1

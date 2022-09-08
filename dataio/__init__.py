@@ -26,6 +26,8 @@ def get_data(args, return_val=False, val_downscale=4.0, **overwrite_cfgs):
         cfgs['uv_size'] = args.data.get('uv_size', 256)
         cfgs['select_frame'] = args.data.get('select_frame', 'uniform')
         cfgs['num_frame'] = args.data.get('num_frame', 1)
+        cfgs['start_frame'] = args.data.get('start_frame', 0)
+        cfgs['end_frame'] = args.data.get('end_frame', -1)
     if dataset_type == 'DTU':
         cfgs['views'] = args.data.get('train_views', [])
 
