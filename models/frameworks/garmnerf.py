@@ -100,7 +100,7 @@ class GarmentNerf(nn.Module):
         self.mesh = Mesh(file_name=os.path.join(asset_dir, 'smpl/smpl/smpl_uv.obj'))
         self.tposeInfo = None
         self.transInfo = None
-        if self.input_type == 'dispproj':
+        if self.input_type in ['dispproj', 'disptframe']:
             self.dispprojfunc = DispersedProjector(cache_path='assets/smpl/smpl', mesh=self.mesh)
             # todo check Author's original impl
             # from utils.Disperse_projection_ref import SurfaceAlignedConverter
@@ -114,7 +114,7 @@ class GarmentNerf(nn.Module):
     def to(self, device):
         new_self = super(GarmentNerf, self).to(device)
         new_self.mesh.to(device)
-        if self.input_type=='dispproj':
+        if hasattr(new_self, 'dispprojfunc'): #.input_type==['dispproj', 'disptframe']:
             new_self.dispprojfunc.to(device)
             # new_self.dispprojfunc_.to(device)
 
@@ -253,6 +253,19 @@ class GarmentNerf(nn.Module):
             #                    query=x[..., :numpts, :].detach().cpu(),
             #                    vnear=vnear_tpose[..., :numpts, :].detach().cpu(), pp_color=vnear[..., :numpts, :].detach().cpu(),
             #                    faces_tanframe=None)
+        elif self.input_type == 'disptframe':
+            # Dispersed projection
+            h, st_, _, vnear_, idxs_ = self.dispprojfunc(x, self.mesh, vnear=vnear, st=st, idxs=idxs)
+            vnear_tpose = self.tposeInfo['B'][idxs_] + \
+                          st_[..., 0].unsqueeze(-1) * self.tposeInfo['E0'][idxs_] + \
+                          st_[..., 1].unsqueeze(-1) * self.tposeInfo['E1'][idxs_]
+            st = st_
+            idxs = idxs_
+            # Canonical space alignment method
+            x_diff = x - vnear_
+            x_tf = self.mesh.faces_tanframe[idxs] @ x_diff.unsqueeze(-1)
+            x_tpose = (self.tposeInfo['tanframe_inv'][idxs] @ x_tf)[..., 0] + vnear_tpose
+            uvh = torch.cat([vnear_tpose, x_tpose], dim=-1)
         else:
             raise NotImplementedError
 
@@ -381,7 +394,7 @@ def get_model(args):
 
     if model_config['input_type'] in ['directproj', 'dispproj']:# 'tframe'
         decoder_cfg['input_ch'] = 4
-    elif model_config['input_type'] == 'tframe':
+    elif model_config['input_type'] in ['tframe', 'disptframe']:
         decoder_cfg['input_ch'] = 6
     else:
         decoder_cfg['input_ch'] = 3

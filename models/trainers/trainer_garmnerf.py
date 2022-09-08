@@ -53,7 +53,7 @@ class Trainer(nn.Module):
         # bounding_box = model_input['bbox_mask'].to(device)
         # near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)
         self.model.mesh.update_vertices(vertices)
-        if args.model.input_type in ['tframe','directproj','dispproj']:
+        if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in model_input['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in model_input['transformInfo'].items()}
@@ -173,7 +173,7 @@ class Trainer(nn.Module):
         vertices = val_in['vertices'][0].to(device)
         self.model.mesh.update_vertices(vertices)
         # self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
-        if args.model.input_type in ['tframe','directproj','dispproj']:
+        if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in val_in['transformInfo'].items()}
@@ -247,7 +247,7 @@ class Trainer(nn.Module):
         vertices = val_in['vertices'].to(device)
         # vertices = self.model.tposeInfo['vertices'] #todo delete this later
         self.model.mesh.update_vertices(vertices)
-        if args.model.input_type in ['tframe','directproj','dispproj']:
+        if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
             self.model.tposeInfo = {key: val.to(device) for key, val in val_in['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val.to(device) for key, val in val_in['transformInfo'].items()}
@@ -312,7 +312,7 @@ class Trainer(nn.Module):
                     smpl_param = model_input['smpl_params']['poses'][:, 0, :].to(
                         device) if args.data.smpl_feat != 'none' else None
                     vertices = model_input['vertices'][0].to(device)
-                    if args.model.input_type in ['tframe','directproj','dispproj']:
+                    if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
                         self.model.tposeInfo = {key: val[0].to(device) for key, val in model_input['tposeInfo'].items()}
                         # vertices = self.model.tposeInfo['vertices'] # to check pose deviations
                     elif args.model.input_type == 'invskin':
@@ -340,7 +340,7 @@ class Trainer(nn.Module):
                     _, nablas_out, _, _ = self.model.forward_sdf_with_nablas(pts_out.unsqueeze(0), cbfeat=cbfeat,
                                                                              idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
                                                                              smpl_param=smpl_param)
-
+                    # todo could add sdf loss since we compute distance
                     # manifold loss
                     loss_ptson = (sdf_on.abs()).mean()
 

@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def main_function(args):
-    args.update({'device_ids': [1]})  # Temporary
+    args.update({'device_ids': [5]})  # Temporary
     init_env(args)
 
     # ----------------------------
@@ -128,6 +128,11 @@ def main_function(args):
         if 'lr_pretrain' in args.training and it==0:
             pretrain_config['lr'] = args.training.lr_pretrain
             try:
+                # todo tmp
+                io_util.cond_mkdir(mesh_dir)
+                _, data_in, _ = dataloader.dataset.__getitem__(0)
+                trainer.val_mesh(args, data_in, os.path.join(mesh_dir, 'pretrained_{:05d}.ply'.format(it_pretrain)),
+                                 render_kwargs_test, device)
                 isSucesses, it_pretrain = trainer.pretrain(args, dataloader, render_kwargs_test, **pretrain_config)
                 if isSucesses:
                     checkpoint_io.save(filename='latest.pt'.format(it), global_step=it, epoch_idx=epoch_idx,
@@ -324,7 +329,9 @@ if __name__ == "__main__":
     # Arguments
     parser = argparse.ArgumentParser()
     # standard configs
-    parser.add_argument('--config', type=str, default='config_test/garmnerf_debug.yaml', help='Path to config file.')
+    # parser.add_argument('--config', type=str, default='config_test/garmnerf_debug_featext.yaml', help='Path to config file.')
+    parser.add_argument('--config', type=str, default='config_test/garmnerf_debug.yaml',
+                        help='Path to config file.')
     parser.add_argument('--resume_dir', type=str, default=None, help='Directory of experiment to load.')
     parser.add_argument("--ddp", action='store_true', help='whether to use DDP to train.')
     parser.add_argument("--port", type=int, default=None, help='master port for multi processing. (if used)')

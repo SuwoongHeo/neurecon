@@ -167,8 +167,10 @@ class MLPNet(nn.Module):
             indims[self.W_up - 1] = indims[self.W_up - 1] * 2
 
         if len(skips) > 0:
-            indims[self.skips] = indims[self.skips] + in_dim # or # W
-            outdims[self.skips - 1] = indims[self.skips-1] # or # W - in_dim
+            # indims[self.skips] = indims[self.skips] # indims[self.skips] + in_dim # or # W
+            # outdims[self.skips - 1] = indims[self.skips-1] - in_dim # indims[self.skips-1] # or # W - in_dim
+            indims[self.skips] = indims[self.skips] + in_dim
+            outdims[self.skips - 1] = indims[self.skips-1]
 
         if len(featcats) > 0 and featdim != 0:
             indims[self.featcats] = indims[self.featcats] + featdim
@@ -198,6 +200,7 @@ class MLPNet(nn.Module):
         h = x
         for i in range(self.D):
             if i in self.skips:
+                # NOTE: concat order can not change! there are special operations taken in intialization.
                 h = torch.cat([h, x], dim=-1) / np.sqrt(2)
             if i in self.featcats and infeat is not None:
                 h = torch.cat([h, infeat], dim=-1) / np.sqrt(2)
@@ -209,7 +212,8 @@ class MLPNet(nn.Module):
         return out
 
 def weight_init_SAL(layers, skips, radius_init, embed_multires):
-    D = len(layers) - 1
+    #D = len(layers) - 1
+    D = len(layers)
     input_ch = layers[0].in_features
     for l, m in enumerate(layers):
         # --------------
@@ -219,14 +223,22 @@ def weight_init_SAL(layers, skips, radius_init, embed_multires):
             nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(m.in_features), std=0.0001)
             nn.init.constant_(m.bias, -radius_init)
         elif embed_multires > 0 and l == 0:
-            torch.nn.init.constant_(m.bias, 0.0)
-            torch.nn.init.constant_(m.weight[:, 3:], 0.0)  # let the initial weights for octaves to be 0.
-            torch.nn.init.normal_(m.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+            nn.init.constant_(m.bias, 0.0)
+            # 3 means that the network only account for first 3 (x,y,z) input elements for spherei intialization
+            # nn.init.constant_(m.weight[:, 3:], 0.0)  # let the initial weights for octaves to be 0.
+            # nn.init.normal_(m.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+            nn.init.constant_(m.weight[:, 4:], 0.0)  #todo temporary for dispproj
+            nn.init.constant_(m.weight[:, :3], 0.0)  # todo temporary for dispproj
+            nn.init.normal_(m.weight[:, 3], 0.0, np.sqrt(2) / np.sqrt(m.out_features)) # todo temporary for dispproj
         elif embed_multires > 0 and l in skips:
-            torch.nn.init.constant_(m.bias, 0.0)
-            torch.nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
-            torch.nn.init.constant_(m.weight[:, -(input_ch - 3):],
-                                    0.0)  # NOTE: this contrains the concat order to be  [h, x_embed]
+            nn.init.constant_(m.bias, 0.0)
+            nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+            # nn.init.constant_(m.weight[:, -(input_ch - 3):],
+            #                         0.0)  # NOTE: this contrains the concat order to be  [h, x_embed]
+            nn.init.constant_(m.weight[:, -(input_ch):-(input_ch - 3)],
+                              0.0)  # NOTE: this contrains the concat order to be  [h, x_embed] # todo temporary for dispproj
+            nn.init.constant_(m.weight[:, -(input_ch - 4):],
+                              0.0)  # NOTE: this contrains the concat order to be  [h, x_embed] # todo temporary for dispproj
         else:
             nn.init.constant_(m.bias, 0.0)
             nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))

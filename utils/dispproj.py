@@ -354,6 +354,7 @@ class DispersedProjector(object):
 
         return faces_to_corres_edges, edges_to_corres_faces, verts_to_corres_faces
 
+
 def diagonal_dot(a, b):
     return T.matmul(a * b, T.ones(a.shape[1]).to(a.device))
 
@@ -384,6 +385,8 @@ def points_to_barycentric(triangles, points):
     barycentric[:, 0] = 1 - barycentric[:, 1] - barycentric[:, 2]
 
     return barycentric
+
+
 
 if __name__=="__main__":
     from pytorch3d.utils import ico_sphere

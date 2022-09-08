@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from utils.io_util import read_obj
 
 from pytorch3d import _C
+from pytorch3d.ops import knn_points
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TkAgg')
@@ -317,7 +318,7 @@ def project2closest_face(query, mesh: Mesh, use_cgd=False, stability_scale=stabi
     with T.no_grad():
         dists, idxs = _C.point_face_dist_forward(
             vquery*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64),
-            tris*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64), vquery.size()[0], 5e-3
+            tris*stability_scale, T.zeros((1,), device=tris.device, dtype=T.int64), vquery.size()[0]
         )
 
     vnear, st = mesh.project_func(vquery, idxs, eps=0, use_cgd=use_cgd)
@@ -364,7 +365,15 @@ def _approx_inout_sign_raytracing(query, mesh):
     # contains = 1 - 2*contains #{-1, 1}, -1 for inside, +1 for outside
 
     # return contains
+#todo enable encoding methods (e.g., NeuMesh, RBF encoding of arch etc.)
+def compute_knn_distance_pt3d(query, mesh, K=8, **kwargs):
+    # knn_output. : dists (N, P1, K), idx (N, P1, K),
+    # input : query (N, ,P1, D) / vertices (N, P2, D)
+    knn_output = knn_points(query, mesh.vertices, None, None, K=K, return_nn=False, return_sorted=True)
+    dist = knn_output.dists
+    idx = knn_output.idx
 
+    return idx, dist
 
 if __name__=="__main__":
     from pytorch3d.utils import ico_sphere
