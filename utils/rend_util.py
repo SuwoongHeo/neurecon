@@ -398,7 +398,7 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
         weights      : Computed density at that point (pdf)
         N_importance : Number of samples to take
         det          : If perturbation on (det=False) after sampling, it will sample random point [0,1]
-                       if not, it will it will take evenly spaced sample from [0,1]. Then it will map to original pdf
+                       if not, it will take evenly spaced sample from [0,1]. Then it will map to original pdf
     """
     # device = weights.get_device()
     device = weights.device
@@ -411,15 +411,21 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     )  # (batch, len(bins))
 
     # Take uniform samples
+    # swheo: Since cdf[0]=0 and cdf[1]=1, inverse sampling always return duplicated sample of start 0 and end bins[-1]
+    # thus, additional two samples are added (N_importance+2)
     if det:
-        u = torch.linspace(0.0, 1.0, steps=N_importance, device=device)
-        u = u.expand(list(cdf.shape[:-1]) + [N_importance])
+        u = torch.linspace(0.0, 1.0, steps=N_importance+2, device=device)
+        u = u.expand(list(cdf.shape[:-1]) + [N_importance+2])
     else:
-        u = torch.rand(list(cdf.shape[:-1]) + [N_importance], device=device)
+        u = torch.rand(list(cdf.shape[:-1]) + [N_importance+2], device=device)
     u = u.contiguous()
 
     # Invert CDF
-    inds = torch.searchsorted(cdf.detach(), u, right=False)
+    # swheo: searchsorted(a,v,right=?) returns indicies where satisfying,
+    # left(right=False) : a[i-1] < v <= a[i]
+    # right : a[i-1] <= v < a[i]
+    # inds = torch.searchsorted(cdf.detach(), u, right=False)
+    inds = torch.searchsorted(cdf.detach(), u, right=True)
 
     below = torch.clamp_min(inds-1, 0)
     above = torch.clamp_max(inds, cdf.shape[-1]-1)
@@ -435,7 +441,7 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     denom[denom<eps] = 1
     t = (u - cdf_g[..., 0]) / denom
     samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
-
+    samples = samples[..., 1:-1] # swheo. only use intermediate samples
     return samples
 
 def sample_cdf(bins, cdf, N_importance, det=False, eps=1e-5):
