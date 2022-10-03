@@ -108,8 +108,7 @@ def backup(backup_dir):
     log.info("=> Backing up... ")
     special_files_to_copy = []
     filetypes_to_copy = [".py"]
-    subdirs_to_copy = ["", "dataio/", "models/", "tools/", "debug_tools/", "utils/", "models/frameworks/", "models/layers/"]
-
+    subdirs_to_copy = ["", "dataio/", "models/*", "tools/", "debug_tools/", "utils/"]
     this_dir = "./" # TODO
     cond_mkdir(backup_dir)
     # special files
@@ -124,22 +123,30 @@ def backup(backup_dir):
         for file in special_files_to_copy
     ]
     # dirs
-    for subdir in subdirs_to_copy:
-        cond_mkdir(os.path.join(backup_dir, subdir))
-        files = os.listdir(os.path.join(this_dir, subdir))
-        files = [
-            file
-            for file in files
-            if os.path.isfile(os.path.join(this_dir, subdir, file))
-            and file[file.rfind("."):] in filetypes_to_copy
-        ]
-        [
-            shutil.copyfile(
-                os.path.join(this_dir, subdir, file),
-                os.path.join(backup_dir, subdir, file),
-            )
-            for file in files
-        ]
+    for _subdir in subdirs_to_copy:
+        if "*" in _subdir:
+            _subdir = _subdir.replace('*', '')
+            subdirs = os.listdir(os.path.join(this_dir, _subdir))
+            subdirs = [os.path.join(_subdir, _dir) for _dir in subdirs
+                       if os.path.isdir(os.path.join(this_dir, _subdir, _dir)) and _dir != "__pycache__"]
+        else:
+            subdirs = [_subdir]
+        for subdir in subdirs:
+            cond_mkdir(os.path.join(backup_dir, subdir))
+            files = os.listdir(os.path.join(this_dir, subdir))
+            files = [
+                file
+                for file in files
+                if os.path.isfile(os.path.join(this_dir, subdir, file))
+                and file[file.rfind("."):] in filetypes_to_copy
+            ]
+            [
+                shutil.copyfile(
+                    os.path.join(this_dir, subdir, file),
+                    os.path.join(backup_dir, subdir, file),
+                )
+                for file in files
+            ]
     log.info("done.")
 
 

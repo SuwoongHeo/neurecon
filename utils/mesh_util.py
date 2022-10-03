@@ -34,7 +34,7 @@ def convert_sigma_samples_to_ply(
             input_3d_sigma_array, level=level, spacing=volume_size
         )
     except ValueError:
-        log.debug("Error with marching cube level {0}, try with other level for now...".format(level))
+        log.info("Error with marching cube level {0}, try with other level for now...".format(level))
         level = 0.5 * (input_3d_sigma_array.min() + input_3d_sigma_array.max())
         verts, faces, normals, values = skimage.measure.marching_cubes(
             input_3d_sigma_array, level=level, spacing=volume_size
@@ -118,14 +118,17 @@ def extract_mesh(implicit_surface, volume_size=2.0, level=0.0, N=512, filepath='
 
     out = batchify(implicit_surface.forward, xyz)
     out = out.reshape([N, N, N])
-    verts, faces = convert_sigma_samples_to_ply(out, voxel_grid_origin, [float(v) / N for v in volume_size], None, level=level)
 
-    el_verts = plyfile.PlyElement.describe(verts, "vertex")
-    el_faces = plyfile.PlyElement.describe(faces, "face")
+    verts, faces = marching_cube_mesh(out, voxel_grid_origin, volume_size=volume_size, level=level, N=N, filepath=filepath)
 
-    ply_data = plyfile.PlyData([el_verts, el_faces])
-    log.info("saving mesh to %s" % str(filepath))
-    ply_data.write(filepath)
+    # verts, faces = convert_sigma_samples_to_ply(out, voxel_grid_origin, [float(v) / N for v in volume_size], None, level=level)
+    #
+    # el_verts = plyfile.PlyElement.describe(verts, "vertex")
+    # el_faces = plyfile.PlyElement.describe(faces, "face")
+    #
+    # ply_data = plyfile.PlyData([el_verts, el_faces])
+    # log.info("saving mesh to %s" % str(filepath))
+    # ply_data.write(filepath)
 
     #todo enable color extraction
 
@@ -175,8 +178,18 @@ def extract_mesh_nerfpp(nerfpp, volume_size=2.0, level=50.0, N=512, obj_bounding
     out[~fg_indices] = bg_sigma
     out = out.reshape([N, N, N])
 
-    verts, faces = convert_sigma_samples_to_ply(out, voxel_grid_origin, [float(v) / N for v in volume_size], filepath,
-                                                level=level)
+    verts, faces = marching_cube_mesh(out, voxel_grid_origin, volume_size=volume_size, level=level, N=N, filepath=filepath)
+
     return verts, faces
 
-    
+def marching_cube_mesh(density, voxel_grid_origin, volume_size=2.0, level=0.0, N=512, filepath='./surface.ply'):
+    verts, faces = convert_sigma_samples_to_ply(density, voxel_grid_origin, [float(v) / N for v in volume_size], filepath,
+                                                level=level)
+    el_verts = plyfile.PlyElement.describe(verts, "vertex")
+    el_faces = plyfile.PlyElement.describe(faces, "face")
+
+    ply_data = plyfile.PlyData([el_verts, el_faces])
+    log.info("saving mesh to %s" % str(filepath))
+    ply_data.write(filepath)
+
+    return verts, faces

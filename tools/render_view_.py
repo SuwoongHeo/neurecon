@@ -217,7 +217,7 @@ def visualize_cam_spherical_spiral(intr, extrs, up_vec, c0, focus_center, n_rots
 
 
 def main_function(args):
-    args.update({'device_ids': [0], 'ddp':False})  # Temporary
+    args.update({'device_ids': [7], 'ddp':False})  # Temporary
     init_env(args)
 
     # ----------------------------
@@ -546,10 +546,10 @@ if __name__ == "__main__":
     print(os.chdir('../'))
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='logs/neusseg_nomask_jungwoo_exp_b_7/config.yaml', help='Path to config file.')
+    parser.add_argument('--config', type=str, default='logs/neus_mask_zju_test/config.yaml', help='Path to config file.')
     parser.add_argument('--resume_dir', type=str, default=None, help='Directory of experiment to load.')
     parser.add_argument("--num_views", type=int, default=100)
-    parser.add_argument("--render_mesh", type=str, default='logs/neusseg_nomask_jungwoo_exp_b_7/meshes/00300000.ply', help='the mesh ply file to be rendered')
+    parser.add_argument("--render_mesh", type=str, default='logs/neus_mask_zju_test/meshes/00300000.ply', help='the mesh ply file to be rendered')
     parser.add_argument("--device", type=str, default='cuda', help='render device')
     parser.add_argument("--downscale", type=float, default=4)
     parser.add_argument("--rayschunk", type=int, default=1048)

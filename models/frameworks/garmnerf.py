@@ -263,8 +263,8 @@ class GarmentNerf(nn.Module):
             idxs = idxs_
             # Canonical space alignment method
             x_diff = x - vnear_
-            x_tf = self.mesh.faces_tanframe[idxs] @ x_diff.unsqueeze(-1)
-            x_tpose = (self.tposeInfo['tanframe_inv'][idxs] @ x_tf)[..., 0] + vnear_tpose
+            x_tf = self.mesh.faces_tanframe[idxs_] @ x_diff.unsqueeze(-1)
+            x_tpose = (self.tposeInfo['tanframe_inv'][idxs_] @ x_tf)[..., 0] + vnear_tpose
             uvh = torch.cat([vnear_tpose, x_tpose], dim=-1)
         else:
             raise NotImplementedError
@@ -344,29 +344,31 @@ class GarmentNerf(nn.Module):
         _, feats, intmed_feat = self.forward_sdf(x, cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
                                                    smpl_param=smpl_param,
                                                    return_h=True)
-        # feats[-2] : idCfeat_, feates[-1]: uvh
+        # feats[-2] : idSfeat_, feates[-1]: uvh
         x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with color identity feature, uvh
         logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs,
                                                intmed_feat)  # Note. second, third input will not be used
         return logits
 
     def forward(self, x: torch.Tensor, view_dirs: torch.Tensor,
-                cbuvmap: torch.Tensor, iduvmap: torch.Tensor, smpl_param: torch.Tensor):
+                cbfeat: torch.Tensor, idGfeat: torch.Tensor, idCfeat: torch.Tensor, idSfeat: torch.Tensor,
+                smpl_param: torch.Tensor, compute_radiance=True, compute_logit=True):
         """
         :param x : xyz points, [B, N_ryas, N_pts, 3]
-        :param uvh : uv point and distance [B, N_ryas, N_pts, 3]
         :param view_dirs : uv point and distance [B, N_ryas, N_pts, 3]
-        :param cbuvmap : canonical body uvmap feature, [B, ch, H, W]
-        :param iduvmap : identity uvmap feature, [B, ch, H, W]
+        :param cbfeat : canonical body uvmap feature, [B, ch, H, W]
+        :param idGfeat : identity uvmap feature, [B, self.W_idG_feat, H, W]
+        :param idCfeat : identity uvmap feature, [B, self.W_idC_feat, H, W]
         """
-        cbfeat, idGfeat, idCfeat, idSfeat = self.forward_featext(cbuvmap, iduvmap)
+        # cbfeat, idGfeat, idCfeat, idSfeat = self.forward_featext(cbuvmap, iduvmap)
         sdf, nablas, feats, intmed_feat = self.forward_sdf_with_nablas(x, cbfeat=cbfeat, idGfeat=idGfeat,
                                                                        idCfeat=idCfeat, idSfeat=idSfeat,
                                                                        smpl_param=smpl_param)
         x_ = torch.cat([feats[-3], feats[-1]], dim=-1)  # concat with color identity feature, uvh
-        radiances = self.decoder.radiance_net.forward(x_, view_dirs, nablas, intmed_feat)
-        x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with color identity feature, uvh
-        logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs, intmed_feat)
+        radiances = self.decoder.radiance_net.forward(x_, view_dirs, nablas, intmed_feat) if compute_radiance else None
+        x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with segment identity feature, uvh
+        logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs, intmed_feat) if compute_logit else None
+
         return radiances, sdf, nablas, logits
 
 

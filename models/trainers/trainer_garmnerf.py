@@ -18,6 +18,12 @@ from kornia.morphology import dilation
 
 import matplotlib.cm as colormap
 
+def get_cos_anneal_ratio(it, anneal_end):
+    if anneal_end == 0.0:
+        return 1.0
+    else:
+        return np.min([1.0, it/anneal_end])
+
 class Trainer(nn.Module):
     def __init__(self, model, device_ids=[0], batched=True):
         super().__init__()
@@ -34,6 +40,7 @@ class Trainer(nn.Module):
                 ground_truth,
                 render_kwargs_train: dict,
                 it: int,
+                detailed_output=True,
                 device='cuda'):
         B, H, W = model_input['object_mask'].shape
         mask = model_input['object_mask'].reshape(B, -1).to(device)
@@ -48,7 +55,7 @@ class Trainer(nn.Module):
         # Computed object bounding bbox
         margin = 0.2
         bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
-        bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W)
+        bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)[0]
         # mask = model_input['object_mask'].to(device)
         # bounding_box = model_input['bbox_mask'].to(device)
         # near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)
@@ -64,8 +71,6 @@ class Trainer(nn.Module):
             jittered=args.training.jittered if args.training.get('jittered') is not None else False,
             mask=bounding_box.reshape([-1, H, W])[0] if args.training.get('sample_maskonly',
                                                                           False) is not False else None  # ,
-            #todo. Note sampling inside bounding box would yield repeated density update along with outermost side of the box
-            # - Need to spread it how?
         )
         # [B, N_rays, 3]
         target_rgb = torch.gather(ground_truth['rgb'].to(device), 1, torch.stack(3 * [select_inds], -1))
@@ -85,12 +90,14 @@ class Trainer(nn.Module):
         vvv = torch.bmm(intrinsics, dddd.transpose(-1,-2))
         plt.scatter(vvv[0,0,:].detach().cpu().numpy(), vvv[0,1,:].detach().cpu().numpy())
         """
-        rgb, depth_v, extras = self.renderer(rays_o, rays_d, detailed_output=True,
+        cos_anneal_ratio = get_cos_anneal_ratio(it, args.training.anneal_end) if args.training.anneal_end > 0. else -1.0
+        rgb, depth_v, extras = self.renderer(rays_o, rays_d, detailed_output=detailed_output,
                                              cbfeat_map=cbuvmap,
                                              idfeat_map=idfeatmap,
                                              smpl_param=smplparams,
                                              bounding_box=bbox.to(device)
                                              if args.training.get('sample_maskonly', False) is not False else None,
+                                             cos_anneal_ratio=cos_anneal_ratio,
                                              **render_kwargs_train)
 
         # [B, N_rays, N_pts, 3]
@@ -144,13 +151,14 @@ class Trainer(nn.Module):
         extras['implicit_nablas_norm'] = nablas_norm
         extras['scalars'] = {'1/s': 1. / self.model.decoder.forward_s().data}
         extras['select_inds'] = select_inds
-        sample_range = extras.pop('sample_range').reshape((-1, 2, 3))
-        range_min = sample_range[:, 0, :].min(0)[0]
-        range_max = sample_range[:, 1, :].max(0)[0]
-        extras['scalars'].update(
-            {'minx': range_min[0], 'miny': range_min[1], 'minz': range_min[2]})
-        extras['scalars'].update(
-            {'maxx': range_max[0], 'maxy': range_max[1], 'maxz': range_max[2]})
+        # if detailed_output:
+        #     sample_range = extras.pop('sample_range').reshape((-1, 2, 3))
+        #     range_min = sample_range[:, 0, :].min(0)[0]
+        #     range_max = sample_range[:, 1, :].max(0)[0]
+        #     extras['scalars'].update(
+        #         {'minx': range_min[0], 'miny': range_min[1], 'minz': range_min[2]})
+        #     extras['scalars'].update(
+        #         {'maxx': range_max[0], 'maxy': range_max[1], 'maxz': range_max[2]})
 
         return OrderedDict(
             [('losses', losses),
@@ -160,9 +168,10 @@ class Trainer(nn.Module):
             args,
             val_in,
             val_gt,
+            it,
             render_kwargs_test: dict,
             device='cuda'):
-
+        B, H, W = val_in['object_mask'].shape
         intrinsics = val_in["intrinsics"].to(device)
         c2w = val_in['c2w'].to(device)
         cbuvmap = val_in['cbuvmap'].to(device)
@@ -177,10 +186,14 @@ class Trainer(nn.Module):
             self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in val_in['transformInfo'].items()}
-        B, H, W = val_in['object_mask'].shape
+
         mask_ = dilation(val_in['object_mask'].unsqueeze(0).to(device), torch.ones(11,11).to(device),
                          border_type='constant', border_value=0.)
         mask = mask_.reshape(B, -1) > 0.
+        # Computed object bounding bbox
+        margin = 0.2
+        bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
+        bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W)[0]
 
         if not render_kwargs_test['maskonly']:
             mask = None
@@ -194,11 +207,14 @@ class Trainer(nn.Module):
             c2w, intrinsics, H, W, N_rays=-1, mask=mask)
         target_rgb = val_gt['rgb'].to(device)
         target_segm = val_gt['segm'].to(device)
+        cos_anneal_ratio = get_cos_anneal_ratio(it, args.training.anneal_end) if args.training.anneal_end > 0. else -1.0
         rgb, depth_v, ret = self.renderer(rays_o, rays_d, detailed_output=False,
                                           calc_normal=True,
                                           cbfeat_map=cbuvmap,
                                           idfeat_map=idfeatmap,
                                           smpl_param=smplparams,
+                                          bounding_box=bbox.to(device) if args.training.get('sample_maskonly',False) is not False else None,
+                                          cos_anneal_ratio=cos_anneal_ratio,
                                           **render_kwargs_test)
 
         to_img = functools.partial(
@@ -279,7 +295,7 @@ class Trainer(nn.Module):
             dataloader,
             render_kwargs_test: dict,
             device='cuda',
-            it=1, num_iters=5000, lr=1.0e-4, batch_points=10000,
+            it=1, num_iters=5000, lr=1.0e-4, batch_points=6890,
             logger=None,
             **kwargs, #reserved
     ):
@@ -297,6 +313,9 @@ class Trainer(nn.Module):
             optimizer = optim.Adam([{"params":params, "lr":lr}, {"params":render_kwargs_test['idfeat_map_all'], "lr":args.training.lr_idfeat}])
         else:
             optimizer = optim.Adam(params, lr=lr)
+        # todo : Use epoch - iteration not iteration only
+        # swheo : As in https://github.com/jby1993/SelfReconCode/blob/538dcb24b90eb4f5412e6379ced027cc8153cdd0/model/network.py#L219
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 500, 0.5)
         local_sigma = torch.from_numpy(dataloader.dataset.local_sigma).to(device).unsqueeze(-1).float()
 
         if it >= num_iters:
@@ -332,20 +351,21 @@ class Trainer(nn.Module):
                     normals = self.model.mesh.vert_normal[sample_inds, :]
                     cbfeat, idGfeat, idCfeat, idSfeat = self.model.forward_featext(cbuvmap=cbuvmap, iduvmap=idfeatmap)
 
-                    sdf_on, nablas_on, _, _ = self.model.forward_sdf_with_nablas(pts_on.unsqueeze(0), cbfeat=cbfeat,
-                                                                                 idGfeat=idGfeat,
-                                                                                 idCfeat=idCfeat,
-                                                                                 idSfeat=idSfeat,
-                                                                                 smpl_param=smpl_param)
-                    _, nablas_out, _, _ = self.model.forward_sdf_with_nablas(pts_out.unsqueeze(0), cbfeat=cbfeat,
-                                                                             idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
+                    pts_ = torch.cat([pts_on, pts_out], dim=0)
+                    sdf_, nablas_, _, _ = self.model.forward_sdf_with_nablas(pts_.unsqueeze(0), cbfeat=cbfeat,
+                                                                             idGfeat=idGfeat,
+                                                                             idCfeat=idCfeat,
+                                                                             idSfeat=idSfeat,
                                                                              smpl_param=smpl_param)
+                    sdf_on = sdf_[..., :pts_on.shape[0]]
+                    nablas_on = nablas_[..., :pts_on.shape[0], :]
+                    nablas_out = nablas_[..., pts_on.shape[0]:, :]
                     # todo could add sdf loss since we compute distance
                     # manifold loss
                     loss_ptson = (sdf_on.abs()).mean()
 
                     # eikonal loss
-                    loss_eik = 1 * ((nablas_out.norm(2, dim=-1) - 1) ** 2).mean()
+                    loss_eik = .1 * ((nablas_out.norm(2, dim=-1) - 1) ** 2).mean()
 
                     # normal loss
                     loss_norm = 1 * ((nablas_on - normals).abs()).norm(2, dim=-1).mean()

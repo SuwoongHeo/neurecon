@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def main_function(args):
-    args.update({'device_ids': [5]})  # Temporary
+    args.update({'device_ids': [2]})  # Temporary
     init_env(args)
 
     # ----------------------------
@@ -82,29 +82,25 @@ def main_function(args):
     log.info("=> Nerf params: " + str(train_util.count_trainable_parameters(model)))
 
     # build optimizer
-    if render_kwargs_train['idfeat_map_all'] != None:
-        optimizer = get_optimizer_([{"params": model.parameters(), "lr": args.training.lr},
-                                    {"params": render_kwargs_train['idfeat_map_all'], "lr": args.training.lr_idfeat}
-                                    ])
+    if 'idfeat_map_all' in render_kwargs_train.keys():
+        if render_kwargs_train['idfeat_map_all'] != None:
+            optimizer = get_optimizer_([{"params": model.parameters(), "lr": args.training.lr},
+                                        {"params": render_kwargs_train['idfeat_map_all'], "lr": args.training.lr_idfeat}
+                                        ])
+            model_params = {"model":model, "idfeat":render_kwargs_train['idfeat_map_all']}
     else:
         optimizer = get_optimizer_([{"params": model.parameters(), "lr": args.training.lr}])
+        model_params = {"model": model}
 
     # checkpoints
     checkpoint_io = CheckpointIO(checkpoint_dir=os.path.join(exp_dir, 'ckpts'), allow_mkdir=is_master())
     if world_size > 1:
         dist.barrier()
     # Register modules to checkpoint
-    if render_kwargs_train['idfeat_map_all'] != None:
-        checkpoint_io.register_modules(
-            model=model,
-            idfeat=render_kwargs_train['idfeat_map_all'],
-            optimizer=optimizer,
-        )
-    else:
-        checkpoint_io.register_modules(
-            model=model,
-            optimizer=optimizer,
-        )
+    checkpoint_io.register_modules(
+        **model_params,
+        optimizer=optimizer,
+    )
 
     # Load checkpoints
     load_dict = checkpoint_io.load_file(
@@ -129,10 +125,11 @@ def main_function(args):
             pretrain_config['lr'] = args.training.lr_pretrain
             try:
                 # todo tmp
-                io_util.cond_mkdir(mesh_dir)
-                _, data_in, _ = dataloader.dataset.__getitem__(0)
-                trainer.val_mesh(args, data_in, os.path.join(mesh_dir, 'pretrained_{:05d}.ply'.format(it_pretrain)),
-                                 render_kwargs_test, device)
+                with torch.no_grad():
+                    io_util.cond_mkdir(mesh_dir)
+                    _, data_in, _ = dataloader.dataset.__getitem__(0)
+                    trainer.val_mesh(args, data_in, os.path.join(mesh_dir, 'pretrained_{:05d}.ply'.format(it_pretrain)),
+                                     render_kwargs_test, device)
                 isSucesses, it_pretrain = trainer.pretrain(args, dataloader, render_kwargs_test, **pretrain_config)
                 if isSucesses:
                     checkpoint_io.save(filename='latest.pt'.format(it), global_step=it, epoch_idx=epoch_idx,
@@ -145,6 +142,11 @@ def main_function(args):
             except KeyboardInterrupt:
                 checkpoint_io.save(filename='latest.pt'.format(it), global_step=it, epoch_idx=epoch_idx,
                                    pretrain_step=it_pretrain)
+                with torch.no_grad():
+                    io_util.cond_mkdir(mesh_dir)
+                    _, data_in, _ = dataloader.dataset.__getitem__(0)
+                    trainer.val_mesh(args, data_in, os.path.join(mesh_dir, 'pretrained_{:05d}.ply'.format(it_pretrain)),
+                                     render_kwargs_test, device)
                 sys.exit()
 
     # Parallel training
@@ -154,10 +156,11 @@ def main_function(args):
     # build scheduler
     scheduler = get_scheduler(args, optimizer, last_epoch=it - 1)
     t0 = time.time()
-    if render_kwargs_train['idfeat_map_all'] != None:
-        log.info('=> Start training..., it={}, lr={}, lr_feat={}, in {}'.format(it, optimizer.param_groups[0]['lr'],
-                                                                                optimizer.param_groups[1]['lr'],
-                                                                                exp_dir))
+    if 'idfeat_map_all' in render_kwargs_train.keys():
+        if render_kwargs_train['idfeat_map_all'] != None:
+            log.info('=> Start training..., it={}, lr={}, lr_feat={}, in {}'.format(it, optimizer.param_groups[0]['lr'],
+                                                                                    optimizer.param_groups[1]['lr'],
+                                                                                    exp_dir))
     else:
         log.info('=> Start training..., it={}, lr={}, in {}'.format(it, optimizer.param_groups[0]['lr'], exp_dir))
     end = (it >= args.training.num_iters)
@@ -177,9 +180,9 @@ def main_function(args):
                         scalars = {}
                         with torch.no_grad():
                             for idx, (val_ind, val_in, val_gt) in enumerate(valloader):
-                                val_imgs = trainer.module.val(args, val_in, val_gt, render_kwargs_test, device=device) \
+                                val_imgs = trainer.module.val(args, val_in, val_gt, it, render_kwargs_test, device=device) \
                                     if isinstance(trainer, torch.nn.parallel.distributed.DistributedDataParallel) else \
-                                    trainer.val(args, val_in, val_gt, render_kwargs_test, device=device)
+                                    trainer.val(args, val_in, val_gt, it, render_kwargs_test, device=device)
                                 for name, value in val_imgs.items():
                                     if 'val/' in name:
                                         logger.add_imgs(value, name, it, prefix=val_in['tag'][0], monitor=idx == 0)
@@ -231,8 +234,7 @@ def main_function(args):
                     losses['total'].backward()
                     # NOTE: check grad before optimizer.step()
                     if True:
-                        grad_norms = train_util.calc_grad_norm(model=model,
-                                                               idfeat=render_kwargs_train['idfeat_map_all'])
+                        grad_norms = train_util.calc_grad_norm(**model_params)
                     optimizer.step()
                     scheduler.step(it)  # NOTE: important! when world_size is not 1
 
@@ -251,13 +253,22 @@ def main_function(args):
                         # ----------------------------------------------------------------------------
                         # ------------------- things only done in master -----------------------------
                         # ----------------------------------------------------------------------------
-                        if render_kwargs_train['idfeat_map_all'] != None:
-                            pbar.set_postfix(lr=optimizer.param_groups[0]['lr'],
-                                             lr_feat=optimizer.param_groups[1]['lr'],
-                                             loss_total=losses['total'].item(), loss_img=losses['loss_img'].item())
-                        else:
-                            pbar.set_postfix(lr=optimizer.param_groups[0]['lr'],
-                                             loss_total=losses['total'].item(), loss_img=losses['loss_img'].item())
+                        lrs = {f'lr_{name}':val['lr'] for name, val in zip(model_params.keys(), optimizer.param_groups)}
+                        losses_= {f"loss_{name.replace('loss_','')}":val.item() for name, val in losses.items()}
+                        pbar.set_postfix(**grad_norms, **lrs, **losses_)
+                        # if render_kwargs_train['idfeat_map_all'] != None:
+                        #     pbar.set_postfix(lr=optimizer.param_groups[0]['lr'],
+                        #                      lr_feat=optimizer.param_groups[1]['lr'],
+                        #                      loss_total=losses['total'].item(), loss_img=losses['loss_img'].item(),
+                        #                      loss_eikonal=losses['loss_eikonal'].item(),
+                        #                      loss_mask=losses['loss_mask'].item() if 'loss_mask' in losses.keys() else 0.,
+                        #                      loss_seg=losses['loss_seg'].item() if 'loss_seg' in losses.keys() else 0.)
+                        # else:
+                        #     pbar.set_postfix(lr=optimizer.param_groups[0]['lr'],
+                        #                      loss_total=losses['total'].item(), loss_img=losses['loss_img'].item(),
+                        #                      loss_eikonal=losses['loss_eikonal'].item(),
+                        #                      loss_mask=losses['loss_mask'].item() if 'loss_mask' in losses.keys() else 0.,
+                        #                      loss_seg=losses['loss_seg'].item() if 'loss_seg' in losses.keys() else 0.)
 
                         if i_backup > 0 and int_it % i_backup == 0 and it > 0:
                             checkpoint_io.save(filename='{:08d}.pt'.format(it), global_step=it, epoch_idx=epoch_idx)
@@ -330,7 +341,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # standard configs
     # parser.add_argument('--config', type=str, default='config_test/garmnerf_debug_featext.yaml', help='Path to config file.')
-    parser.add_argument('--config', type=str, default='config_test/garmnerf_debug.yaml',
+    # parser.add_argument('--config', type=str, default='config_test/garmnerf_debug.yaml',
+    #                     help='Path to config file.')
+    parser.add_argument('--config', type=str, default='config_test/neuralbody_debug.yaml',
                         help='Path to config file.')
     parser.add_argument('--resume_dir', type=str, default=None, help='Directory of experiment to load.')
     parser.add_argument("--ddp", action='store_true', help='whether to use DDP to train.')

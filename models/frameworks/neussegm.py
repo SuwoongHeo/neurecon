@@ -25,21 +25,30 @@ def cdf_Phi_s(x, s):
     # return y
     return torch.sigmoid(x*s)
 
-
-def sdf_to_alpha(sdf: torch.Tensor, s):
+def sdf_to_alpha(prev_sdf: torch.Tensor, next_sdf: torch.Tensor, s):
+    # Ref https://github.com/Totoro97/NeuS/blob/6f96f96005d72a7a358379d2b576c496a1ab68dd/models/renderer.py#L247
     # [(B), N_rays, N_pts]
-    cdf = cdf_Phi_s(sdf, s)
-    # [(B), N_rays, N_pts-1]
-    # TODO: check sanity.
-    opacity_alpha = (cdf[..., :-1] - cdf[..., 1:]) / (cdf[..., :-1] + 1e-10)
-    opacity_alpha = torch.clamp_min(opacity_alpha, 0)
-    return cdf, opacity_alpha
+    prev_cdf = cdf_Phi_s(prev_sdf, s)
+    next_cdf = cdf_Phi_s(next_sdf, s)
 
+    opacity_alpha = (prev_cdf - next_cdf) / (prev_cdf + 1e-10)
+
+    cdf = torch.zeros([*prev_sdf.shape[:-1], prev_sdf.shape[-1]+1],
+                      dtype=prev_sdf.dtype).to(prev_sdf.device)
+    cdf[...,0] = prev_cdf[...,0]
+    cdf[...,1:-1] = (prev_cdf[...,1:] + next_cdf[...,:-1])*.5
+    cdf[...,-1] = next_cdf[...,-1]
+    opacity_alpha = torch.clamp_min(opacity_alpha, 0)
+    # opacity_alpha = torch.clamp_min(opacity_alpha, 1e-6)
+    # opacity_alpha.clip(0.0, 1.0)  # According to Ref, It violates the equation (13). Above is right
+    return cdf, opacity_alpha
 
 def sdf_to_w(sdf: torch.Tensor, s):
     device = sdf.device
     # [(B), N_rays, N_pts-1]
-    cdf, opacity_alpha = sdf_to_alpha(sdf, s)
+    # cdf, opacity_alpha = sdf_to_alpha(sdf, s)
+    cdf, opacity_alpha = sdf_to_alpha(prev_sdf=sdf[...,:-1], next_sdf=sdf[...,1:], s=s)
+
 
     # [(B), N_rays, N_pts]
     shifted_transparency = torch.cat(
@@ -96,10 +105,10 @@ class NeuSSegm(nn.Module):
         if W_geo_feat < 0:
             W_geo_feat = self.implicit_surface.W
         self.radiance_net = RadianceNet(
-            W_geo_feat=W_geo_feat, **radiance_cfg)
+            W_geo_feat=W_geo_feat, activation_output=nn.Sigmoid(), **radiance_cfg)
         if segmentation_cfg is not None:
             self.segm_net = RadianceNet(
-                W_geo_feat=W_geo_feat, **segmentation_cfg)
+                W_geo_feat=W_geo_feat, activation_output=None, **segmentation_cfg)
             cmap = colormap.get_cmap('jet', segmentation_cfg['output_dim'])
             self.labels_cmap = torch.from_numpy(cmap(range(segmentation_cfg['output_dim']))[:, :3])
         else:
@@ -313,7 +322,8 @@ def volume_render(
         # sdf, nablas, _ = model.implicit_surface.forward_with_nablas(pts)
         sdf, nablas, _, = batchify_query(model.implicit_surface.forward_with_nablas, pts)
         # [(B), N_ryas, N_pts], [(B), N_ryas, N_pts-1]
-        cdf, opacity_alpha = sdf_to_alpha(sdf, model.forward_s())
+        # cdf, opacity_alpha = sdf_to_alpha(sdf, model.forward_s())
+        cdf, opacity_alpha = sdf_to_alpha(prev_sdf=sdf[...,:-1], next_sdf=sdf[..., 1:], s=model.forward_s())
         # radiances = model.forward_radiance(pts_mid, view_dirs_mid)
         radiances = batchify_query(model.forward_radiance, pts_mid, view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None)
         logits = batchify_query(model.forward_segm, pts_mid, view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None)

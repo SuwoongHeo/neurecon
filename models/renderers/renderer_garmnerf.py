@@ -1,5 +1,6 @@
 from utils import rend_util, train_util, mesh_util, io_util
 from models.frameworks.neussegm import cdf_Phi_s, alpha_to_w, sdf_to_w, sdf_to_alpha
+
 import os
 import copy
 import functools
@@ -61,6 +62,7 @@ def volume_render(
         idfeat_map=None,
         smpl_param=None,
         bounding_box=None,
+        cos_anneal_ratio=-1.0, #swheo : Just as in original author's impl
         **dummy_kwargs  # just place holder
 ):
     """
@@ -118,7 +120,6 @@ def volume_render(
 
         # ---------------
         # Coarse Points
-
         # [(B), N_rays, N_samples]
         _t = torch.linspace(0, 1, N_samples).float().to(device)
         d_coarse = near * (1 - _t) + far * _t
@@ -170,13 +171,29 @@ def volume_render(
                     prev_sdf, next_sdf = _sdf[..., :-1], _sdf[..., 1:]
                     prev_z_vals, next_z_vals = _d[..., :-1], _d[..., 1:]
                     mid_sdf = (prev_sdf + next_sdf) * 0.5
-                    dot_val = (next_sdf - prev_sdf) / (next_z_vals - prev_z_vals + 1e-5)
+                    dot_val = (next_sdf - prev_sdf) / (next_z_vals - prev_z_vals + 1e-5) # slope
+                    # ----------------------------------------------------------------------------------------------------------
+                    # Use min value of [ cos, prev_cos ]
+                    # Though it makes the sampling (not rendering) a little bit biased, this strategy can make the sampling more
+                    # robust when meeting situations like below:
+                    #
+                    # SDF
+                    # ^
+                    # |\          -----x----...
+                    # | \        /
+                    # |  x      x
+                    # |---\----/-------------> 0 level
+                    # |    \  /
+                    # |     \/
+                    # |
+                    # ----------------------------------------------------------------------------------------------------------
                     prev_dot_val = torch.cat([torch.zeros_like(dot_val[..., :1], device=device), dot_val[..., :-1]],
                                              dim=-1)  # jianfei: prev_slope, right shifted
                     dot_val = torch.stack([prev_dot_val, dot_val], dim=-1)  # jianfei: concat prev_slope with slope
                     dot_val, _ = torch.min(dot_val, dim=-1,
                                            keepdim=False)  # jianfei: find the minimum of prev_slope and current slope. (forward diff vs. backward diff., or the prev segment's slope vs. this segment's slope)
-                    dot_val = dot_val.clamp(-10.0, 0.0)
+                    # dot_val = dot_val.clamp(-10.0, 0.0)
+                    dot_val = dot_val.clamp(-1e3, 0.0) #swheo : as in original code
 
                     dist = (next_z_vals - prev_z_vals)
                     prev_esti_sdf = mid_sdf - dot_val * dist * 0.5
@@ -188,58 +205,83 @@ def volume_render(
                     _w = alpha_to_w(alpha)
                     d_fine = rend_util.sample_pdf(_d, _w, N_importance // N_upsample_iters, det=not perturb)
                     _d = torch.cat([_d, d_fine], dim=-1)
-
-                    sdf_fine = batchify_query(model.forward_sdf,
-                                              rays_o.unsqueeze(-2) + d_fine.unsqueeze(-1) * rays_d.unsqueeze(-2),
-                                              cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
-                                              smpl_param=smpl_param)[0]
-                    _sdf = torch.cat([_sdf, sdf_fine], dim=-1)
                     _d, d_sort_indices = torch.sort(_d, dim=-1)
-                    _sdf = torch.gather(_sdf, DIM_BATCHIFY + 1, d_sort_indices)
+                    #swheo : from original code, avoid redundant computation
+                    if i != (N_upsample_iters-1):
+                        sdf_fine = batchify_query(model.forward_sdf,
+                                                  rays_o.unsqueeze(-2) + d_fine.unsqueeze(-1) * rays_d.unsqueeze(-2),
+                                                  cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
+                                                  smpl_param=smpl_param)[0]
+                        _sdf = torch.cat([_sdf, sdf_fine], dim=-1)
+                        _sdf = torch.gather(_sdf, DIM_BATCHIFY + 1, d_sort_indices)
                 d_all = _d
             else:
                 raise NotImplementedError
 
+
         # ------------------
         # Calculate Points
         # [(B), N_rays, N_samples+N_importance, 3]
-        pts = rays_o[..., None, :] + rays_d[..., None, :] * d_all[..., :, None]
-        # [(B), N_rays, N_pts-1, 3]
-        # pts_mid = 0.5 * (pts[..., 1:, :] + pts[..., :-1, :])
-        d_mid = 0.5 * (d_all[..., 1:] + d_all[..., :-1])
-        pts_mid = rays_o[..., None, :] + rays_d[..., None, :] * d_mid[..., :, None]
-        sample_range = torch.stack([pts.reshape((-1, 3)).min(0)[0], pts.reshape((-1, 3)).max(0)[0]])[None, None, ...]
-        #todo, shift mask and take one other points outside mask than use it for volume rendering?
-        #
+        if cos_anneal_ratio < 0.0:
+            pts = rays_o[..., None, :] + rays_d[..., None, :] * d_all[..., :, None]
+            # [(B), N_rays, N_pts-1, 3]
+            d_mid = 0.5 * (d_all[..., 1:] + d_all[..., :-1])
 
-        # if bounding_box is not None:
-        #     inside_mask = torch.all(pts>=bounding_box[None,None,0,:], dim=-1) &\
-        #                   torch.all(pts<=bounding_box[None,None,1,:], dim=-1)
-        #     inside_mask_mid = torch.all(pts_mid>=bounding_box[None,None,0,:], dim=-1) & \
-        #                       torch.all(pts_mid<=bounding_box[None,None,1,:], dim=-1)
-        # else:
-        #     inside_mask = torch.ones_like(pts[...,0]) > 0.
-        #     inside_mask_mid = inside_mask = torch.ones_like(pts_mid[...,0]) > 0.
-        # inside_mask = torch.ones_like(pts[..., 0]) > 0.
-        # inside_mask_mid = inside_mask = torch.ones_like(pts_mid[..., 0]) > 0.
+            #todo compare with or without using this (p_c_1,2)
+            pts_mid = rays_o[..., None, :] + rays_d[..., None, :] * d_mid[..., :, None]
+            # pts_mid = pts[...,:-1,:] # swheo it is not working well?
+        else:
+            dists_ = d_all[...,1:] - d_all[...,:-1]
+            dists_ = torch.concat([dists_, torch.tensor([obj_bounding_radius*2/N_samples], device=device).expand(dists_[...,:1].shape)], dim=-1) #
+            d_mid = d_all + dists_*0.5
+            pts = rays_o[..., None, :] + rays_d[..., None, :] * d_mid[..., :, None]
+            pts_mid = pts
+
+        sample_range = torch.stack([pts.reshape((-1, 3)).min(0)[0], pts.reshape((-1, 3)).max(0)[0]])[None, None, ...]
 
         # ------------------
         # Inside Scene
         # ------------------
-        sdf, nablas, _, _ = batchify_query(model.forward_sdf_with_nablas, pts, cbfeat=cbfeat, idGfeat=idGfeat,
-                                           idCfeat=idCfeat, idSfeat=idSfeat,
-                                           smpl_param=smpl_param)#, inside_mask=inside_mask)
+        _, sdf, nablas, _ = batchify_query(model.forward, pts, view_dirs=None, cbfeat=cbfeat, idGfeat=idGfeat,
+                                           idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param,
+                                           compute_radiance=False, compute_logit=False)
+        if cos_anneal_ratio >= 0.0:
+            # https://github.com/Totoro97/NeuS/blob/6f96f96005d72a7a358379d2b576c496a1ab68dd/models/renderer.py#L230
+            # It prevent the back-facing point to be in part of rendering
+            # "cos_anneal_ratio" grows from 0 to 1 in the beginning training iterations. The anneal strategy below makes
+            # the cos value "not dead" at the beginning training iterations, for better convergence.
+            true_cos = (rays_d[...,None,:].expand(nablas.shape) * nablas).sum(-1, keepdim=True)
+
+            iter_cos = -(F.relu(-true_cos * 0.5 + 0.5) * (1.0 - cos_anneal_ratio) +
+                         F.relu(-true_cos) * cos_anneal_ratio)  # always non-positive
+
+            # # Estimate signed distances at section points
+            next_sdf = sdf + iter_cos.squeeze(-1) * dists_ * 0.5 # Getting inside if sign is opposite
+            prev_sdf = sdf - iter_cos.squeeze(-1) * dists_ * 0.5 # Comes from outside if sign is opposite
+        else:
+            next_sdf = sdf[...,1:]
+            prev_sdf = sdf[...,:-1]
+            
+        # sdf, nablas, _, _ = batchify_query(model.forward_sdf_with_nablas, pts, cbfeat=cbfeat, idGfeat=idGfeat,
+        #                                    idCfeat=idCfeat, idSfeat=idSfeat,
+        #                                    smpl_param=smpl_param)#, inside_mask=inside_mask)
         # sdf[~inside_mask] = obj_bounding_radius
         # [(B), N_ryas, N_pts], [(B), N_ryas, N_pts-1]
-        cdf, opacity_alpha = sdf_to_alpha(sdf, model.decoder.forward_s())
+        # cdf, opacity_alpha = sdf_to_alpha(sdf, model.decoder.forward_s())
+        cdf, opacity_alpha = sdf_to_alpha(prev_sdf=prev_sdf, next_sdf=next_sdf, s=model.decoder.forward_s())
         # radiances = model.forward_radiance(pts_mid, view_dirs_mid)
-        radiances = batchify_query(model.forward_radiance, pts_mid,
+
+        radiances, _, _, logits = batchify_query(model.forward, pts_mid,
                                    view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
-                                   cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
-        if model.decoder.segm_net is not None:
-            logits = batchify_query(model.forward_segm, pts_mid,
-                                    view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
-                                    cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
+                                   cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param,
+                                   compute_radiance=True, compute_logit=True if model.decoder.segm_net is not None else False)
+        # radiances = batchify_query(model.forward_radiance, pts_mid,
+        #                            view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
+        #                            cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
+        # if model.decoder.segm_net is not None:
+        #     logits = batchify_query(model.forward_segm, pts_mid,
+        #                             view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
+        #                             cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
         # ------------------
         # Outside Scene
         # ------------------

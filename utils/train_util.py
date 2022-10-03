@@ -3,19 +3,19 @@ import numpy as np
 from typing import Iterable
 
 def calc_grad_norm(norm_type=2.0, **named_models):
-    gradient_norms = {'total': 0.0}
+    gradient_norms = {'grad_total': 0.0}
     for name, model in named_models.items():
         if model==None:
             continue
-        gradient_norms[name] = 0.0
+        gradient_norms[f"grad_{name}"] = 0.0
         if hasattr(model, 'parameters'):
             for p in list(model.parameters()):
                 if p.requires_grad and p.grad is not None:
                     param_norm = p.grad.data.norm(norm_type)
-                    gradient_norms[name] += param_norm.item() ** norm_type
+                    gradient_norms[f"grad_{name}"] += param_norm.item() ** norm_type
         elif type(model) == torch.Tensor:
-            gradient_norms[name] = model.grad.data.norm(norm_type).item() ** norm_type
-        gradient_norms['total'] += gradient_norms[name]
+            gradient_norms[f"grad_{name}"] = model.grad.data.norm(norm_type).item() ** norm_type
+        gradient_norms['grad_total'] += gradient_norms[f"grad_{name}"]
     for k, v in gradient_norms.items():
         gradient_norms[k] = v ** (1.0 / norm_type)
     return gradient_norms
@@ -62,13 +62,13 @@ def batchify_query(query_fn, *args: Iterable[torch.Tensor], chunk, dim_batchify,
                 v = torch.cat(tmp_dict[k], dim=dim_batchify)
                 tmp_dict[k] = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]])
             entry = tmp_dict
-        if isinstance(entry[0], tuple):
+        elif isinstance(entry[0], tuple):
             tmp_list = []
             for entry_item in entry[0]:
                 v = torch.cat([entry_item], dim=dim_batchify) #todo check
                 tmp_list.append(v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]]))
             entry = tuple(tmp_list)
-        else:
+        elif isinstance(entry[0], torch.Tensor):
             # [(B), N_rays*N_pts, ...] -> [(B), N_rays, N_pts, ...]
             # entry = torch.cat(entry, dim=dim_batchify).unflatten(dim_batchify, [_N_rays, _N_pts])
             # NOTE: compatible with torch 1.6
