@@ -1,0 +1,108 @@
+expname: neuralbody_test_default
+desc: "To compare cos_anneal sampling with sphere init"
+# device_ids: [0]     # single gpu           ; run on specified GPU
+# device_ids: [1, 0]  # DP                   ; run on specified GPU
+device_ids: -1        # single GPU / DP / DDP; run on all available GPUs;
+
+data:
+  type: 'MviewTemporalSMPL'
+  batch_size: 1       # one batch, one image
+  data_dir: /ssd2/swheo/db/ZJU_MOCAP/LightStage
+  #cam_file: 'cameras.npz'
+  subjects: ['363']
+  train_views: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  #[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] ZJU_mocap
+  test_views: [1, 3, 9] #Sanity check
+  downscale: 1        # downscale image for training
+  pin_memory: True
+  num_workers: 8
+  N_rays: 2048  #N_rand of NB original code(subj 313)
+  val_rayschunk: 4096 #2048  # 2048 N_rays for validation
+  val_downscale: 1     # downscale image for validation
+  val_rendermaskonly: True # To use provided mask for validation image
+
+  scale_radius: 3.0   # scale the dataset's all camera to be within this radius
+  select_frame: 'uniform' # 'uniform' : uniform interval, 'rand' : randomly choose
+  start_frame: 0
+  end_frame: -1
+  num_frame: 400
+  # num_frame: -878 #1 #300      # maximum number of frames to be used #default 150
+
+  smpl_type: 'smpl'
+  uv_size: 128 #128
+  smpl_feat: 'none' #'pose'
+
+  mesh_th: 5.0 #iso-value for marching cube
+  maskbkg: True #Just like NB
+model:
+  framework: NeuralBody
+  use_frame_latent: True
+  use_segm : False
+  voxel_size : [0.005, 0.005, 0.005]
+  enlarge_box : 0.05
+  perturb : True
+  W_smpl_emb : 16 # Size of feature at smpl vertices
+  W_spconv_out: 128 # Size of output of sparse convolution
+  W_frame_emb : 128 # Size of frame latent
+
+  decoder:
+    W_geo_feat: 256 # Size of intermediate feature from density mododule to the radance module (W_geo_feat)
+    input_ch: 0 # Neuralbody doesn't use xyz to the surface network (density)
+    ## Original Arch.
+    surface:
+      D: 3
+      W: 256
+      W_up: []
+      skips: []
+      featcats: []
+      input_feat: 352 # Sparseconv conv1 32 + conv2 64 + conv3 128 + conv4 128
+
+    radiance:
+      input_dim_pts: 3 # use xyz for radiance estimation
+      D: 1
+      W: 128
+      W_up: [] #[0,1]
+      skips: []
+      embed_multires: 10
+      embed_multires_view: 4  # as in the NeuS official implementaion
+
+    segmentation:
+      D: 3 #3 Use less depth than radiance
+      W: 128
+      W_up: []# [0,1]
+      skips: []
+      embed_multires: -1
+      use_view_dirs: False
+      output_dim: 4 # 4 classes (Bkg, Naked, Upper, Lower)
+
+training:
+  lr: 5.0e-4
+
+  jittered: True        # Jittered ray sampling using uniform distribution
+  sample_maskonly: True
+  # neus
+  w_seg : 1.0 # From Semantic_NeRF
+
+  log_root_dir: "logs"
+  clip_grad: False
+  # lr decay
+  scheduler:
+    type: warmupcosine
+    warmup_steps: 5000 # unit: itertation steps
+#    type: exponential_step
+#    min_factor: 0.1
+
+  # num_epochs: 50000
+  num_iters: 300000 # 300k
+
+  ckpt_file: null # will be read by python as None
+  ckpt_ignore_keys: []     # only change if you want to drop certain keys in the saved checkpionts.
+  ckpt_only_use_keys: null # only change if you want to only use certain keys in the saved checkpionts.
+
+  monitoring: tensorboard
+
+  i_save: 900       # unit: seconds
+  i_backup: 50000   # unit: itertation steps
+
+  i_val: 500
+  i_val_mesh: 10000

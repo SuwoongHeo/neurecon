@@ -436,7 +436,7 @@ if __name__=="__main__":
         from utils import rend_util
         margin = 0.1
         bbox = T.stack([data[1]['vertices'].min(dim=0).values - margin, data[1]['vertices'].max(dim=0).values + margin])
-        bbox_mask = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)
+        bbox_mask = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)[0]
         # Test closet surface point search
         from utils.geometry import Mesh, project2closest_face, texcoord2imcoord
         rays_o, rays_d, select_inds = rend_util.get_rays(

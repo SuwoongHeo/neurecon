@@ -38,6 +38,8 @@ class SceneDataset(torch.utils.data.Dataset):
                  views=[],
                  smpl_type='smpl',
                  maskbkg=False,
+                 use_cbuvmap=False,
+                 use_frame_latent=False,
                  **kwargs):
 
         assert os.path.exists(data_dir), "Data directory is empty"
@@ -45,6 +47,7 @@ class SceneDataset(torch.utils.data.Dataset):
         self.instance_dir = data_dir
         self.downscale = downscale
         self.subjects = subjects
+        self.use_frame_latent = use_frame_latent
         self.smpl = SMPLlayer(os.path.join(asset_dir, 'smpl', smpl_type),
                               model_type=smpl_type,
                               gender='neutral')
@@ -125,7 +128,7 @@ class SceneDataset(torch.utils.data.Dataset):
                     c2w_all[i][:3, 3] *= (scale_radius / max_cam_norm / 1.1)
             self.subjects_data[subject]['c2w_all'] = c2w_all
             scale_mat = np.linalg.inv(scale_mats[0]).T
-            scale_mat = scale_mat * (scale_radius / max_cam_norm / 1.1) if scale_radius > 0 else scale_mat
+            scale_mat[...,:3] = scale_mat[...,:3] * (scale_radius / max_cam_norm / 1.1) if scale_radius > 0 else scale_mat[...,:3]
             self.subjects_data[subject]['scale_mat'] = torch.from_numpy(scale_mat).float()
 
             rgb_images = np.array([
@@ -170,8 +173,10 @@ class SceneDataset(torch.utils.data.Dataset):
                                            downscale=1024./uv_size, anti_aliasing=False, order=0))
         uvmask = uvmask[-1]
 
-        self.Renderer = VertColor2UVMapper(mesh.uv, mesh.faces_uv, uvmask[None], find_border=True)
-        self.faces = mesh.faces
+        self.use_cbuvmap = use_cbuvmap
+        if use_cbuvmap:
+            self.Renderer = VertColor2UVMapper(mesh.uv, mesh.faces_uv, uvmask[None], find_border=True)
+            self.faces = mesh.faces
 
         # Computing the pretraining parameters
         # Precompute local deviation of poitns within 50-nearest neighbors
@@ -210,7 +215,7 @@ class SceneDataset(torch.utils.data.Dataset):
             smpl_params[key] = torch.from_numpy(val).float().to(K.device)
 
         if self.maskbkg:
-            img[torch.tile(object_mask, dims=(3, 1, 1)) == 0] = 0
+            img[torch.tile(object_mask, dims=(3, 1, 1)) == 0] = 0.
 
         vertices_world,transforms_world = self.smpl(return_verts=True,
                         return_tensor=True,
@@ -218,23 +223,32 @@ class SceneDataset(torch.utils.data.Dataset):
                         return_transforms=True,
                         **smpl_params)
         vertices_world = vertices_world[0]
+        # Match world vertices to the world space of cameras
+        scale_mat = self.subjects_data[subject]['scale_mat']
+        vertices_world = (torch.concat([vertices_world, torch.ones((vertices_world.shape[0], 1), device=vertices_world.device)], dim=-1) \
+         @ scale_mat)[..., :3]
+
         R = batch_rodrigues(smpl_params['Rh'])[0]
         T = smpl_params['Th']
         c2w = self.subjects_data[subject]['c2w_all'][cam_ind]
+        # Modify Rh, Th according to the scale matrix [Ss, Ts]
+        # ((V-Ts)@inv(Ss) - T)@R = (V@inv(Ss) - Ts@inv(Ss) - T)@R = (V@inv(Ss) - Ts@inv(Ss) - T@Ss@inv(Ss))@R
+        # = (V - (Ts + T@Ss))@inv(Ss)@R -> T' = Ts + T@Ss, R' = inv(Ss)@R
+        R_ = torch.linalg.inv(scale_mat[:3, :3].expand_as(R)) @ R
+        T_ = scale_mat[3, :3].expand_as(T) + T @ scale_mat[:3, :3].expand_as(R)
+        smpl_params['R'] = R_
+        smpl_params['T'] = T_
 
         # Move to smpl object(canonical)  space
-        vertices_can = (vertices_world - T)@R
-        pelvis = self.smpl.J_regressor[0,:]@vertices_can
-        vertices_can -= pelvis[None]
-        cbuvmap = self.Renderer(vertices_can, self.faces)
+        vertices_can = (vertices_world - T_)@R_
+        # pelvis = self.smpl.J_regressor[0,:]@vertices_can
+        # vertices_can -= pelvis[None]
+
+        cbuvmap = self.Renderer(vertices_can, self.faces).permute(2, 0, 1) if self.use_cbuvmap else torch.Tensor(0) #return dummy tensor
 
         Tglo = torch.cat([F.pad(R, [0, 1, 0, 0]), F.pad(-T @ R, [0, 1], value=1.)], dim=0)
-        transformInfo = {'alignMat':torch.linalg.inv(self.subjects_data[subject]['scale_mat'])@Tglo,
+        transformInfo = {'alignMat':torch.linalg.inv(scale_mat)@Tglo,
                          'A': transforms_world@self.subjects_data[subject]['Acan_inv'], 'W':self.smpl.weights}
-
-        # Match world vertices to the world space of cameras
-        vertices_world = (torch.concat([vertices_world, torch.ones((vertices_world.shape[0], 1), device=vertices_world.device)], dim=-1) \
-         @ self.subjects_data[subject]['scale_mat'])[..., :3]
 
         sample = {
             "object_mask": object_mask, #object_mask.reshape(-1),
@@ -244,11 +258,14 @@ class SceneDataset(torch.utils.data.Dataset):
             "tposeInfo": self.subjects_data[subject]['tposeInfo'],
             "transformInfo": transformInfo,
             "smpl_params": smpl_params,
-            "cbuvmap": cbuvmap.permute(2, 0, 1),
+            "cbuvmap": cbuvmap,
             "subject_id": self.subjects_data[subject]['subject_id'],
             "subject": subject,
             "tag": f"s{subject}c{cam_ind}f{frameind}"
         }
+
+        if self.use_frame_latent:
+            sample['frame_latent_ind'] = torch.tensor(np.where(self.subjects_data[subject]['frame_inds'] == frameind)[0])
 
         ground_truth = {
             "rgb": img.reshape(3,-1).transpose(1,0),
@@ -382,7 +399,7 @@ if __name__ == "__main__":
         # Computed object bounding bbox
         margin = 0.1
         bbox = torch.stack([data[1]['vertices'].min(dim=0).values-margin, data[1]['vertices'].max(dim=0).values+margin])
-        bbox_mask = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)
+        bbox_mask = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)[0]
         # bbox = bbox.to(c2w.device)
         # bbox_mask = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)
         rays_o, rays_d, select_inds = rend_util.get_rays(

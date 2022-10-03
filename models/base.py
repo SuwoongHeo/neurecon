@@ -138,12 +138,24 @@ class DenseLayer(nn.Linear):
             out = self.activation(out)
         return out
 
+class Conv1DLayer(nn.Conv1d):
+    def __init__(self, input_dim: int, out_dim: int, kernel_size, *args, activation=nn.ReLU(inplace=True), **kwargs):
+        super().__init__(input_dim, out_dim, kernel_size, args, **kwargs)
+        self.activation = activation
+
+    def foward(selfself, x):
+        out = super().forward(x)
+        if self.activation is not None:
+            out = self.activation(out)
+        return out
+
 class MLPNet(nn.Module):
     def __init__(self, in_dim, out_dim,
                 D = 4, W = 256, skips = [], W_up = [],
                 featcats=[], featdim=0,
                 activation_intmed = None,
                 activation_output = None,
+                use_conv1d = False,
                 weight_init = None,
                 weight_norm = True,
                 use_siren = False):
@@ -167,10 +179,10 @@ class MLPNet(nn.Module):
             indims[self.W_up - 1] = indims[self.W_up - 1] * 2
 
         if len(skips) > 0:
-            # indims[self.skips] = indims[self.skips] # indims[self.skips] + in_dim # or # W
-            # outdims[self.skips - 1] = indims[self.skips-1] - in_dim # indims[self.skips-1] # or # W - in_dim
-            indims[self.skips] = indims[self.skips] + in_dim
-            outdims[self.skips - 1] = indims[self.skips-1]
+            indims[self.skips] = indims[self.skips] # indims[self.skips] + in_dim # or # W
+            outdims[self.skips - 1] = indims[self.skips-1] - in_dim # indims[self.skips-1] # or # W - in_dim
+            # indims[self.skips] = indims[self.skips] + in_dim
+            # outdims[self.skips - 1] = indims[self.skips-1]
 
         if len(featcats) > 0 and featdim != 0:
             indims[self.featcats] = indims[self.featcats] + featdim
@@ -179,10 +191,19 @@ class MLPNet(nn.Module):
         layers = []
         for l in range(D + 1):
             if l != D:
-                layer = SirenLayer(indims[l], outdims[l], is_first=(l == 0)) if use_siren \
-                    else DenseLayer(indims[l], outdims[l], activation=activation_intmed)
+                if use_siren:
+                    layer = SirenLayer(indims[l], outdims[l], is_first=(l == 0))
+                elif use_conv1d:
+                    layer = Conv1DLayer(indims[l], outdims[l], kernel_size=1, activation=activation_intmed)
+                else:
+                    layer = DenseLayer(indims[l], outdims[l], activation=activation_intmed)
             else:
-                layer = DenseLayer(indims[l], outdims[l], activation=activation_output)
+                if use_siren:
+                    layer = SirenLayer(indims[l], outdims[l], is_first=(l == 0))
+                elif use_conv1d:
+                    layer = Conv1DLayer(indims[l], outdims[l], kernel_size=1, activation=activation_output)
+                else:
+                    layer = DenseLayer(indims[l], outdims[l], activation=activation_output)
 
             if weight_norm and weight_init is None:
                 layer = nn.utils.weight_norm(layer)
@@ -212,33 +233,30 @@ class MLPNet(nn.Module):
         return out
 
 def weight_init_SAL(layers, skips, radius_init, embed_multires):
-    #D = len(layers) - 1
-    D = len(layers)
+    D = len(layers) - 1
+    # D = len(layers)
     input_ch = layers[0].in_features
     for l, m in enumerate(layers):
         # --------------
         # sphere init, as in SAL / IDR.
         # --------------
         if l == D:
-            nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(m.in_features), std=0.0001)
+            nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(m.in_features), std=0.00001)
             nn.init.constant_(m.bias, -radius_init)
         elif embed_multires > 0 and l == 0:
             nn.init.constant_(m.bias, 0.0)
-            # 3 means that the network only account for first 3 (x,y,z) input elements for spherei intialization
-            # nn.init.constant_(m.weight[:, 3:], 0.0)  # let the initial weights for octaves to be 0.
-            # nn.init.normal_(m.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(m.out_features))
-            nn.init.constant_(m.weight[:, 4:], 0.0)  #todo temporary for dispproj
-            nn.init.constant_(m.weight[:, :3], 0.0)  # todo temporary for dispproj
-            nn.init.normal_(m.weight[:, 3], 0.0, np.sqrt(2) / np.sqrt(m.out_features)) # todo temporary for dispproj
+            ## 3 means that the network only account for first 3 (x,y,z) input elements for spherei intialization
+            nn.init.constant_(m.weight[:, 3:], 0.0)  # let the initial weights for octaves to be 0.
+            nn.init.normal_(m.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(m.out_features))
+            # nn.init.constant_(m.weight[:, 4:], 0.0)  #todo temporary for dispproj
+            # nn.init.constant_(m.weight[:, :3], 0.0)  # todo temporary for dispproj
+            # nn.init.normal_(m.weight[:, 3:4], 0.0, np.sqrt(2) / np.sqrt(m.out_features)) # todo temporary for dispproj
         elif embed_multires > 0 and l in skips:
             nn.init.constant_(m.bias, 0.0)
             nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
-            # nn.init.constant_(m.weight[:, -(input_ch - 3):],
-            #                         0.0)  # NOTE: this contrains the concat order to be  [h, x_embed]
-            nn.init.constant_(m.weight[:, -(input_ch):-(input_ch - 3)],
-                              0.0)  # NOTE: this contrains the concat order to be  [h, x_embed] # todo temporary for dispproj
-            nn.init.constant_(m.weight[:, -(input_ch - 4):],
-                              0.0)  # NOTE: this contrains the concat order to be  [h, x_embed] # todo temporary for dispproj
+            nn.init.constant_(m.weight[:, -(input_ch - 3):], 0.0)  # NOTE: this contrains the concat order to be  [h, x_embed]
+            # nn.init.constant_(m.weight[:, -(input_ch):-(input_ch - 3)], 0.0)  # todo temporary for dispproj
+            # nn.init.constant_(m.weight[:, -(input_ch - 4):], 0.0)  # todo temporary for dispproj
         else:
             nn.init.constant_(m.bias, 0.0)
             nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(m.out_features))
@@ -246,8 +264,15 @@ def weight_init_SAL(layers, skips, radius_init, embed_multires):
 #Todo rename this shitty name
 class ImplicitSurface(nn.Module):
     def __init__(self,
-                 W=256, D=8, W_geo_feat=256, input_dim=3, input_feat=0,  output_dim=1, radius_init=1.0, obj_bounding_size=2.0, embed_multires=6,
-                 skips=[4], featcats=[], W_up=[], geometric_init=True, weight_norm=True, use_siren=False
+                 W=256, D=8, W_geo_feat=256, input_dim=3, input_feat=0,
+                 output_dim=1, radius_init=1.0, obj_bounding_size=2.0, embed_multires=6,
+                 skips=[4], featcats=[], W_up=[],
+                 activation_intmed=nn.Softplus(beta=100),
+                 activation_output=None,
+                 use_conv1d=False,
+                 geometric_init=True,
+                 weight_norm=True,
+                 use_siren=False
                  ):
         """
         W_geo_feat: to set whether to use nerf-like geometry feature or IDR-like geometry feature.
@@ -271,13 +296,14 @@ class ImplicitSurface(nn.Module):
         self.embed_fn, input_ch = get_embedder(embed_multires, input_dim)
         self.input_feat = input_feat
         weight_init = functools.partial(weight_init_SAL, skips=skips, radius_init=radius_init,
-                                        embed_multires=embed_multires)
+                                        embed_multires=embed_multires) if geometric_init else None
         input_ch = input_ch + input_feat if len(featcats)==0 else input_ch
         self.mlpnet = MLPNet(in_dim=input_ch, out_dim=self.output_dim + W_geo_feat if W_geo_feat > 0 else self.output_dim,
                              D=D, W=W, skips=skips, W_up=W_up,
                              featcats=featcats, featdim=self.input_feat,
-                             activation_intmed=nn.Softplus(beta=100),
+                             activation_intmed=activation_intmed,
                              activation_output=None,
+                             use_conv1d=use_conv1d,
                              weight_init=weight_init,
                              weight_norm=weight_norm, use_siren=use_siren)
 
@@ -373,7 +399,11 @@ class RadianceNet(nn.Module):
         W=256, D=4, W_geo_feat=256, input_dim_pts=3, input_feat=0,
         embed_multires=6, embed_multires_view=4, output_dim=3,
         skips=[], featcats=[], W_up=[],
+        activation_intmed=nn.ReLU(inplace=True),
+        activation_output=None,
+        use_normals=True,
         use_view_dirs=True,
+        use_conv1d=False,
         weight_norm=True,
         use_siren=False,):
         super().__init__()
@@ -387,21 +417,26 @@ class RadianceNet(nn.Module):
         self.D = D
         self.W = W
         self.use_view_dirs = use_view_dirs
+        self.use_normals = use_normals
         self.embed_fn, input_ch_pts = get_embedder(embed_multires, input_dim=input_dim_pts)
         if use_view_dirs:
             self.embed_fn_view, input_ch_views = get_embedder(embed_multires_view, input_dim=input_dim_views)
-            in_dim_0 = input_ch_pts + input_ch_views + 3 + W_geo_feat #3 for normal
+            in_dim_0 = input_ch_pts + input_ch_views + W_geo_feat #3 for normal
+            in_dim_0 = in_dim_0 + 3 if use_normals else in_dim_0
         else:
             in_dim_0 = input_ch_pts + W_geo_feat
-
+        #swheo : For logit, unlike semnaticNeRF, the output should be bounded
         input_ch = in_dim_0 + input_feat if len(featcats)==0 else in_dim_0
         self.mlpnet = MLPNet(in_dim=input_ch, out_dim=output_dim,
                              D=D, W=W, skips=skips, W_up=W_up,
                              featcats=featcats, featdim=input_feat,
-                             activation_intmed=nn.ReLU(inplace=True),
-                             activation_output=None if output_dim>3 else nn.Sigmoid(),
+                             activation_intmed=activation_intmed,
+                             # activation_output=None if output_dim > 3 else nn.Sigmoid(),
+                             activation_output=activation_output,
+                             use_conv1d=use_conv1d,
                              weight_init=None,
                              weight_norm=weight_norm, use_siren=use_siren)
+        # swheo: activation_output=nn.Tanh() is seems not a good choice because of gradient vanishing
 
     def forward(
         self, 
@@ -415,13 +450,14 @@ class RadianceNet(nn.Module):
                 feat = x[..., :self.input_feat]
                 x = self.embed_fn(x[..., self.input_feat:])
             else:
-                x[..., self.input_feat:] = self.embed_fn(x[..., self.input_feat:])
+                x = torch.cat([x[..., :self.input_feat], self.embed_fn(x[..., self.input_feat:])], dim=-1)
         else:
             x = self.embed_fn(x)
         # calculate radiance field
         if self.use_view_dirs:
             view_dirs = self.embed_fn_view(view_dirs)
-            radiance_input = torch.cat([x, view_dirs, normals, geometry_feature], dim=-1)
+            radiance_input = torch.cat([x, view_dirs, normals, geometry_feature], dim=-1) if self.use_normals else \
+                torch.cat([x, view_dirs, normals, geometry_feature], dim=-1)
         else:
             radiance_input = torch.cat([x, geometry_feature], dim=-1)
 

@@ -28,6 +28,9 @@ def get_data(args, return_val=False, val_downscale=4.0, **overwrite_cfgs):
         cfgs['num_frame'] = args.data.get('num_frame', 1)
         cfgs['start_frame'] = args.data.get('start_frame', 0)
         cfgs['end_frame'] = args.data.get('end_frame', -1)
+        cfgs['use_frame_latent'] = args.model.get('use_frame_latent', False)
+        cfgs['use_cbuvmap'] = args.model.get('use_cbfeat', False)
+        cfgs['maskbkg'] = args.data.get('maskbkg', False)
     if dataset_type == 'DTU':
         cfgs['views'] = args.data.get('train_views', [])
 
@@ -35,6 +38,8 @@ def get_data(args, return_val=False, val_downscale=4.0, **overwrite_cfgs):
     if return_val:
         if dataset_type == 'MviewTemporalSMPL':
             cfgs['views'] = args.data.get('test_views', [5, 10, 15])
+            cfgs['num_frame'] = 1
+            cfgs['maskbkg'] = args.data.get('maskbkg', False)
         if dataset_type == 'DTU':
             cfgs['views'] = args.data.get('test_views', [])
 

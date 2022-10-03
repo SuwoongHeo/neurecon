@@ -9,31 +9,55 @@ def get_2dmask_from_bbox(bbox, K, pose, H, W):
     """
     modified from neuralBody https://github.com/zju3dv/neuralbody
     """
-    min_x, min_y, min_z = bbox[0]
-    max_x, max_y, max_z = bbox[1]
-    corners_3d = torch.as_tensor([
-        [min_x, min_y, min_z, 1.],
-        [min_x, min_y, max_z, 1.],
-        [min_x, max_y, min_z, 1.],
-        [min_x, max_y, max_z, 1.],
-        [max_x, min_y, min_z, 1.],
-        [max_x, min_y, max_z, 1.],
-        [max_x, max_y, min_z, 1.],
-        [max_x, max_y, max_z, 1.],
-    ]).to(bbox.device)
-    mask = torch.zeros((1,1,H,W), dtype=torch.float32, device=bbox.device)
-    corners_2d = K @ torch.linalg.inv(pose) @ corners_3d.T
-    corners_2d = corners_2d[:2, :] / corners_2d[2, :]
-    corners_2d = (corners_2d.T).unsqueeze(0)
-    color = torch.ones((3,), dtype=torch.float32, device=corners_2d.device)[None]
-    out_ = draw_convex_polygon(mask, corners_2d[0][[0, 1, 3, 2, 0]][None], color)
-    out_ = draw_convex_polygon(out_, corners_2d[0][[4, 5, 7, 6, 5]][None], color)
-    out_ = draw_convex_polygon(out_, corners_2d[0][[0, 1, 5, 4, 0]][None], color)
-    out_ = draw_convex_polygon(out_, corners_2d[0][[2, 3, 7, 6, 2]][None], color)
-    out_ = draw_convex_polygon(out_, corners_2d[0][[0, 2, 6, 4, 0]][None], color)
-    out_ = draw_convex_polygon(out_, corners_2d[0][[1, 3, 7, 5, 1]][None], color)
+    if len(bbox.shape) < 3:
+        # temporary to support batch
+        bbox = bbox[None, :]
+        K = K[None, :]
+        pose = pose[None, :]
 
-    return out_[0,0]
+    B = bbox.shape[0]
+    min_x, min_y, min_z = bbox[:,0].split(1, dim=-1)
+    max_x, max_y, max_z = bbox[:,1].split(1, dim=-1)
+    corners_3d = torch.stack([
+        torch.cat([min_x, min_y, min_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([min_x, min_y, max_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([min_x, max_y, min_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([min_x, max_y, max_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([max_x, min_y, min_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([max_x, min_y, max_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([max_x, max_y, min_z, torch.ones_like(min_x)], dim=-1),
+        torch.cat([max_x, max_y, max_z, torch.ones_like(min_x)], dim=-1)
+    ], dim=1)
+    # corners_3d = torch.as_tensor([
+    #     [min_x, min_y, min_z, 1.],
+    #     [min_x, min_y, max_z, 1.],
+    #     [min_x, max_y, min_z, 1.],
+    #     [min_x, max_y, max_z, 1.],
+    #     [max_x, min_y, min_z, 1.],
+    #     [max_x, min_y, max_z, 1.],
+    #     [max_x, max_y, min_z, 1.],
+    #     [max_x, max_y, max_z, 1.],
+    # ]).to(bbox.device)
+    mask = torch.zeros((B,1,H,W), dtype=torch.float32, device=bbox.device)
+    corners_2d = K @ torch.linalg.inv(pose) @ corners_3d.transpose(-1,-2)
+    corners_2d = corners_2d[:, :2, :] / corners_2d[:, 2, :]
+    # corners_2d = (corners_2d.transpose(-1,-2)).unsqueeze(0)
+    corners_2d = corners_2d.transpose(-1, -2)
+    color = torch.ones((B, 3), dtype=torch.float32, device=corners_2d.device)
+    out_ = draw_convex_polygon(mask, corners_2d[:, [0, 1, 3, 2, 0]], color)
+    out_ = draw_convex_polygon(out_, corners_2d[:, [4, 5, 7, 6, 5]], color)
+    out_ = draw_convex_polygon(out_, corners_2d[:, [0, 1, 5, 4, 0]], color)
+    out_ = draw_convex_polygon(out_, corners_2d[:, [2, 3, 7, 6, 2]], color)
+    out_ = draw_convex_polygon(out_, corners_2d[:, [0, 2, 6, 4, 0]], color)
+    out_ = draw_convex_polygon(out_, corners_2d[:, [1, 3, 7, 5, 1]], color)
+    # out_ = draw_convex_polygon(mask, corners_2d[0][[0, 1, 3, 2, 0]][None], color)
+    # out_ = draw_convex_polygon(out_, corners_2d[0][[4, 5, 7, 6, 5]][None], color)
+    # out_ = draw_convex_polygon(out_, corners_2d[0][[0, 1, 5, 4, 0]][None], color)
+    # out_ = draw_convex_polygon(out_, corners_2d[0][[2, 3, 7, 6, 2]][None], color)
+    # out_ = draw_convex_polygon(out_, corners_2d[0][[0, 2, 6, 4, 0]][None], color)
+    # out_ = draw_convex_polygon(out_, corners_2d[0][[1, 3, 7, 5, 1]][None], color)
+
+    return out_[:,0,...]
 
 
 
@@ -215,6 +239,31 @@ def get_rays(c2w, intrinsics, H, W, N_rays=-1, jittered=False, mask=None):
 
     return rays_o, rays_d, select_inds
 
+# Neural body style
+def get_rays_nb(c2w, intrinsics, H, W, bbox, N_rays, margin=0.0, **ray_kwargs):
+    N_current = 0
+    rays_o, rays_d, select_inds, near, far = [], [], [], [], []
+    while ((N_rays > 0) and (N_current < N_rays)) or ((N_rays==-1) and (N_current==0)):  # todo howto for batched version?
+        rays_o_, rays_d_, select_inds_ = get_rays(
+            c2w, intrinsics, H, W, N_rays=N_rays - N_current, **ray_kwargs)
+        near_, far_, valididx = near_far_from_bbox(rays_o_, rays_d_, bbox, margin=margin)
+        if N_rays < 0:
+            assert valididx.all(), 'valididx has False for validation stage, check needed.'
+        N_current = N_current + torch.sum(valididx).item()
+        rays_o.append(rays_o_[valididx[..., 0]][None])
+        rays_d.append(rays_d_[valididx[..., 0]][None])
+        select_inds.append(select_inds_[valididx[..., 0]][None])
+        near.append(near_[valididx[..., 0]][None])
+        far.append(far_[valididx[..., 0]][None])
+    rays_o = torch.cat(rays_o, dim=1)
+    rays_d = torch.cat(rays_d, dim=1)
+    select_inds = torch.cat(select_inds, dim=1)
+    near = torch.cat(near, dim=1)
+    far = torch.cat(far, dim=1)
+
+    return rays_o, rays_d, select_inds, near, far
+
+
 def get_bound_rays(c2w, intrinsics, H, W):
     device = c2w.device
     if c2w.shape[-1] == 7: #In case of quaternion vector representation
@@ -285,9 +334,12 @@ def near_far_from_bbox(ray_origins: torch.Tensor, ray_directions: torch.Tensor, 
     """
     # ray_directions[(ray_directions < 1e-5) & (ray_directions > -1e-10)] = 1e-5
     # ray_directions[(ray_directions > -1e-5) & (ray_directions < 1e-10)] = -1e-5
-    invdir = 1. / ray_directions
-    t_min = (bounds[:1].expand_as(ray_origins) - margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
-    t_max = (bounds[1:2].expand_as(ray_origins) + margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
+    #todo temporary
+    if len(bounds.shape) < 3:
+        bounds = bounds[None,...]
+    invdir = 1. / (ray_directions + 1e-8)
+    t_min = (bounds[:,:1].expand_as(ray_origins) - margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
+    t_max = (bounds[:,1:2].expand_as(ray_origins) + margin - ray_origins) * invdir #/ (ray_directions + 1e-6)
     t1 = torch.minimum(t_min, t_max)
     t2 = torch.maximum(t_min, t_max)
     near = torch.max(t1, dim=-1, keepdim=True)[0]

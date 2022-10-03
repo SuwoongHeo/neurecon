@@ -11,6 +11,8 @@ def get_model(args):
         from .neussegm import get_model
     elif args.model.framework == 'GarmentNerf':
         from .garmnerf import get_model
+    elif args.model.framework == 'NeuralBody':
+        from .neuralbody import get_model
     else:
         raise NotImplementedError
     return get_model(args)
