@@ -47,6 +47,13 @@ class NeuralBody(nn.Module):
         # Note. swheo: latent MLP will process geofeat before input to the radiance net, treat it as feature
         self.radiance_net = RadianceNet(
             W_geo_feat=0, activation_output=nn.Sigmoid(), **decoder_cfg['radiance_cfg'])
+        if decoder_cfg['segmentation_cfg'] is not None:
+            self.segm_net = RadianceNet(
+                W_geo_feat=0, activation_output=None, **decoder_cfg['segmentation_cfg'])
+            cmap = colormap.get_cmap('jet', decoder_cfg['segmentation_cfg']['output_dim'])
+            self.labels_cmap = torch.from_numpy(cmap(range(decoder_cfg['segmentation_cfg']['output_dim']))[:, :3])
+        else:
+            self.segm_net = None
 
         self.mesh = Mesh(file_name=os.path.join(asset_dir, 'smpl/smpl/smpl_uv.obj'))
         self.mesh_latent = nn.Embedding(self.mesh.vertices.shape[0], W_smpl_emb) # SMPL Point features
@@ -93,10 +100,10 @@ class NeuralBody(nn.Module):
         return features, voxel_coords
 
 
-    def forward(self, x: torch.Tensor, view_dirs: torch.Tensor, xyzc_features: torch.Tensor, latent_idx, compute_rgb=False):
+    def forward(self, x: torch.Tensor, view_dirs: torch.Tensor, xyzc_features: torch.Tensor, latent_idx, compute_rgb=False, compute_seg=False):
         out = self.density_net(xyzc_features, return_h=compute_rgb)
         sigma = out[0] if compute_rgb else out
-        if not compute_rgb:
+        if (not compute_rgb) and (not compute_seg):
             return sigma
         else:
             latent_in = self.frame_latent(latent_idx[:,0])
@@ -104,9 +111,11 @@ class NeuralBody(nn.Module):
             latent_in = latent_in.expand(*out[1].shape[:2], latent_in.shape[-1])
             l_t = self.latent_fc(torch.cat((out[1], latent_in), dim=-1))
             radiance_in = torch.cat((l_t, x), dim=-1)
-            rgb = self.radiance_net(radiance_in, view_dirs, torch.Tensor(0).to(x.device), torch.Tensor(0).to(x.device)) #No use nablas
-            return sigma, rgb
-        # todo segmentation?
+            rgb = self.radiance_net(radiance_in, view_dirs, torch.Tensor(0).to(x.device),
+                                        torch.Tensor(0).to(x.device))  if compute_rgb else None # No use nablas
+            logit = self.segm_net(radiance_in, view_dirs, torch.Tensor(0).to(x.device),
+                                        torch.Tensor(0).to(x.device))  if compute_seg else None # No use nablas
+        return sigma, rgb, logit
 
 def get_model(args):
     model_config = {

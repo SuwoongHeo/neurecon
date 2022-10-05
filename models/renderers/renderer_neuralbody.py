@@ -136,7 +136,7 @@ def volume_render(
     # ---------------
     # Render a ray chunk
     # ---------------
-    def render_rayschunk(rays_o: torch.Tensor, rays_d: torch.Tensor, near=None, far=None):
+    def render_rayschunk(rays_o: torch.Tensor, rays_d: torch.Tensor, near: torch.Tensor=None, far: torch.Tensor=None):
         # rays_o: [(B), N_rays, 3]
         # rays_d: [(B), N_rays, 3]
 
@@ -195,8 +195,8 @@ def volume_render(
                                          R=R, Th=Th, bounds=bounds, voxel_size=voxel_size,
                                          volume_shape=volume_shape)
 
-        sigma, radiance = batchify_query(model.forward, pts, view_dirs.unsqueeze(-2).expand_as(pts), xyz_features,
-                                    latent_idx=frame_latent_ind, compute_rgb=True)
+        sigma, radiance, logit = batchify_query(model.forward, pts, view_dirs.unsqueeze(-2).expand_as(pts), xyz_features,
+                                    latent_idx=frame_latent_ind, compute_rgb=True, compute_seg=True if model.segm_net is not None else False)
 
         # --------------
         # Ray Integration
@@ -226,18 +226,14 @@ def volume_render(
         # Outside Scene
         # ------------------
         # NotImplemented
-        alpha_in = opacity_alpha
-
-        # # [(B), N_rays, N_pts-1]
-        # d_final = d_mid
 
         # # NOTE: to get the correct depth map, the sum of weights must be 1!
         # # depth_map = torch.sum(visibility_weights / (visibility_weights.sum(-1, keepdim=True)+1e-10) * d_final, -1)
-        # if model.decoder.segm_net is not None:
-        #     logit_map = torch.sum(visibility_weights[..., None] * logits, -2)
-        #     # acc_map = torch.sum(visibility_weights, -1)
-        #     label_map = torch.argmax(F.softmax(logit_map, -1), -1)
-        #     label_map_color = model.decoder.labels_cmap[label_map]
+        if model.segm_net is not None:
+            logit_map = torch.sum(visibility_weights[..., None] * logit, -2)
+            # acc_map = torch.sum(visibility_weights, -1)
+            label_map = torch.argmax(F.softmax(logit_map, -1), -1)
+            label_map_color = model.labels_cmap[label_map]
 
         # mask_weights = alpha_to_w(alpha_in)
         # acc_map = torch.sum(mask_weights, -1)
@@ -251,10 +247,10 @@ def volume_render(
             ('mask_volume', acc_map),  # [(B), N_rays]
         ])
 
-        # if model.decoder.segm_net is not None:
-        #     ret_i['logit'] = logit_map # [(B), N_rays, N_classes]
-        #     ret_i['label_map'] = label_map
-        #     ret_i['label_map_color'] = label_map_color
+        if model.segm_net is not None:
+            ret_i['logit'] = logit_map # [(B), N_rays, N_classes]
+            ret_i['label_map'] = label_map
+            ret_i['label_map_color'] = label_map_color
 
         # if calc_normal:
         #     normals_map = F.normalize(nablas, dim=-1)

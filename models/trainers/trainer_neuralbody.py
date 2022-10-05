@@ -46,15 +46,14 @@ class Trainer(nn.Module):
         # NB specific
         frame_latent_ind = model_input['frame_latent_ind'].to(device)
         # Computed object bounding bbox
-        # bbox = torch.stack([vertices.view(-1,3).min(dim=0).values, vertices.view(-1,3).max(dim=0).values]).to(device)
         bbox = torch.stack([vertices.min(dim=1).values, vertices.max(dim=1).values], dim=1).to(device) # [B, 2, 3]
         # Just as neural body concept
         if render_kwargs_train['enlarge_box'] > 0.:
             bbox[:, 0, :] = bbox[:, 0, :] - render_kwargs_train['enlarge_box'] # swheo: for me, it was 0.2
             bbox[:, 1, :] = bbox[:, 1, :] + render_kwargs_train['enlarge_box']
         else:
-            bbox[:, 0, :] = bbox[:, 0, :] - render_kwargs_train['enlarge_box']
-            bbox[:, 1, :] = bbox[:, 1, :] + render_kwargs_train['enlarge_box']
+            bbox[:, 0, 2] = bbox[:, 0, 2] - 0.05
+            bbox[:, 1, 2] = bbox[:, 1, 2] + 0.05
 
         bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)
         # mask = model_input['object_mask'].to(device)
@@ -104,7 +103,8 @@ class Trainer(nn.Module):
         losses = OrderedDict()
 
         # [B, N_rays, 3]
-        losses['loss_img'] = F.mse_loss(rgb, target_rgb, reduction='mean')
+        # losses['loss_img'] = F.mse_loss(rgb, target_rgb, reduction='mean')
+        losses['loss_img'] = F.l1_loss(rgb, target_rgb, reduction='mean')
 
         if 'logit' in extras:
             # [B, N_rays,]
@@ -184,6 +184,8 @@ class Trainer(nn.Module):
                                           smpl_param=smplparams,
                                           bounding_box=bbox.to(device) if args.training.get('sample_maskonly',False) is not False else None,
                                           frame_latent_ind=frame_latent_ind,
+                                          near=near,
+                                          far=far,
                                           **render_kwargs_test)
 
         to_img = functools.partial(
@@ -193,7 +195,7 @@ class Trainer(nn.Module):
         val_imgs = dict()
         val_imgs['val/gt_rgb'] = to_img(target_rgb[mask].unsqueeze(0), mask=mask) if mask is not None else to_img(target_rgb)
         if 'label_map_color' in ret:
-            val_imgs['val/gt_segm'] = to_img(self.model.decoder.labels_cmap[target_segm])
+            val_imgs['val/gt_segm'] = to_img(self.model.labels_cmap[target_segm])
         val_imgs['val/predicted_rgb'] = to_img(rgb, mask=mask)
         val_imgs['scalar/psnr'] = torchmetrics.functional.peak_signal_noise_ratio(val_imgs['val/gt_rgb'],
                                                                                   val_imgs['val/predicted_rgb'], data_range=1.0)
@@ -211,7 +213,7 @@ class Trainer(nn.Module):
             val_imgs['val/predicted_segm'] = to_img(ret['label_map_color'], mask=mask)
             label_map_pred = to_img(ret['label_map'].unsqueeze(-1), mask=mask)
             label_map_gt = to_img(target_segm.unsqueeze(-1))
-            val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(label_map_pred, label_map_gt, num_classes=self.model.decoder.labels_cmap.shape[0])
+            val_imgs['scalar/mask_iou'] = torchmetrics.functional.jaccard_index(label_map_pred, label_map_gt, num_classes=self.model.labels_cmap.shape[0])
 
         return val_imgs
 

@@ -1,5 +1,5 @@
-expname: neuralbody_test_default
-desc: "To compare cos_anneal sampling with sphere init"
+expname: neuralbody_test_segm_l1_loss
+desc: "TBD"
 # device_ids: [0]     # single gpu           ; run on specified GPU
 # device_ids: [1, 0]  # DP                   ; run on specified GPU
 device_ids: -1        # single GPU / DP / DDP; run on all available GPUs;
@@ -37,7 +37,7 @@ data:
 model:
   framework: NeuralBody
   use_frame_latent: True
-  use_segm : False
+  use_segm : True
   voxel_size : [0.005, 0.005, 0.005]
   enlarge_box : 0.05
   perturb : True
