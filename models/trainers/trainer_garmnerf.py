@@ -51,27 +51,54 @@ class Trainer(nn.Module):
         idfeatmap = render_kwargs_train['idfeat_map_all'][model_input['subject_id'].item()][None].to(device) \
             if render_kwargs_train['idfeat_map_all'] != None else None
         smplparams = model_input['smpl_params']['poses'][:, 0, 3:].to(device) if args.data.smpl_feat != 'none' else None
-        vertices = model_input['vertices'][0].to(device)
+        vertices = model_input['vertices'].to(device)
         # Computed object bounding bbox
-        margin = 0.2
-        bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
+        # margin = 0.2
+        # bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
+        # bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W)[0]
+
+        bbox = torch.stack([vertices.min(dim=1).values, vertices.max(dim=1).values], dim=1).to(device) # [B, 2, 3]
+        # Just as neural body concept
+        if render_kwargs_train['enlarge_box'] > 0.:
+            bbox[:, 0, :] = bbox[:, 0, :] - render_kwargs_train['enlarge_box'] # swheo: for me, it was 0.2
+            bbox[:, 1, :] = bbox[:, 1, :] + render_kwargs_train['enlarge_box']
+        else:
+            bbox[:, 0, 2] = bbox[:, 0, 2] - 0.05
+            bbox[:, 1, 2] = bbox[:, 1, 2] + 0.05
+
         bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics, c2w, H, W)[0]
         # mask = model_input['object_mask'].to(device)
         # bounding_box = model_input['bbox_mask'].to(device)
         # near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)
-        self.model.mesh.update_vertices(vertices)
+        self.model.mesh.update_vertices(vertices[0]) #todo enable batched update
         if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in model_input['tposeInfo'].items()}
         elif args.model.input_type == 'invskin':
             self.model.transInfo = {key: val[0].to(device) for key, val in model_input['transformInfo'].items()}
+        # N_rays=-1 for rendering full image
+        if render_kwargs_train['strict_bbox_sampling']:
+            # N_rays=-1 for rendering full image,
+            rays_o, rays_d, select_inds, near, far = \
+                rend_util.get_rays_nb(c2w, intrinsics, H, W, bbox, args.data.N_rays,
+                                      jittered=args.training.jittered if args.training.get('jittered') is not None else False,
+                                      mask=bounding_box.reshape([-1, H, W]) if args.training.get('sample_maskonly', False) is not False else None
+                                      )
+        else:
+            rays_o, rays_d, select_inds = rend_util.get_rays(
+                c2w, intrinsics, H, W, N_rays=args.data.N_rays,
+                jittered=args.training.jittered if args.training.get('jittered') is not None else False,
+                mask=bounding_box.reshape([-1, H, W])[0] if args.training.get('sample_maskonly',
+                                                                              False) is not False else None  # ,
+            )
+            near, far = None, None
 
-        #self.model.transInfo = {key: val[0].to(device) for key, val in model_input['transformInfo'].items()}
-        rays_o, rays_d, select_inds = rend_util.get_rays(
-            c2w, intrinsics, H, W, N_rays=args.data.N_rays,
-            jittered=args.training.jittered if args.training.get('jittered') is not None else False,
-            mask=bounding_box.reshape([-1, H, W])[0] if args.training.get('sample_maskonly',
-                                                                          False) is not False else None  # ,
-        )
+
+        # rays_o, rays_d, select_inds = rend_util.get_rays(
+        #     c2w, intrinsics, H, W, N_rays=args.data.N_rays,
+        #     jittered=args.training.jittered if args.training.get('jittered') is not None else False,
+        #     mask=bounding_box.reshape([-1, H, W])[0] if args.training.get('sample_maskonly',
+        #                                                                   False) is not False else None  # ,
+        # )
         # [B, N_rays, 3]
         target_rgb = torch.gather(ground_truth['rgb'].to(device), 1, torch.stack(3 * [select_inds], -1))
         target_segm = torch.gather(ground_truth['segm'].to(device), 1, select_inds)
@@ -179,8 +206,8 @@ class Trainer(nn.Module):
         idfeatmap = render_kwargs_test['idfeat_map_all'][subject_id][None].to(device) \
             if render_kwargs_test['idfeat_map_all'] != None else None
         smplparams = val_in['smpl_params']['poses'][:, 0, 3:].to(device) if args.data.smpl_feat != 'none' else None
-        vertices = val_in['vertices'][0].to(device)
-        self.model.mesh.update_vertices(vertices)
+        vertices = val_in['vertices'].to(device)
+        self.model.mesh.update_vertices(vertices[0]) #todo enable batched update
         # self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
         if args.model.input_type in ['tframe','directproj','dispproj','disptframe']:
             self.model.tposeInfo = {key: val[0].to(device) for key, val in val_in['tposeInfo'].items()}
@@ -191,9 +218,18 @@ class Trainer(nn.Module):
                          border_type='constant', border_value=0.)
         mask = mask_.reshape(B, -1) > 0.
         # Computed object bounding bbox
-        margin = 0.2
-        bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
-        bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W)[0]
+        # margin = 0.2
+        # bbox = torch.stack([vertices.min(dim=0).values-margin, vertices.max(dim=0).values+margin]).to(device)
+        # bounding_box = rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W)[0]
+
+        bbox = torch.stack([vertices.min(dim=1).values, vertices.max(dim=1).values], dim=1).to(device) # [B, 2, 3]
+        # Just as neural body concept
+        if render_kwargs_test['enlarge_box'] > 0.:
+            bbox[:, 0, :] = bbox[:, 0, :] - render_kwargs_test['enlarge_box'] # swheo: for me, it was 0.2
+            bbox[:, 1, :] = bbox[:, 1, :] + render_kwargs_test['enlarge_box']
+        else:
+            bbox[:, 0, 2] = bbox[:, 0, 2] - 0.05
+            bbox[:, 1, 2] = bbox[:, 1, 2] + 0.05
 
         if not render_kwargs_test['maskonly']:
             mask = None
@@ -202,9 +238,16 @@ class Trainer(nn.Module):
             # mask = (rend_util.get_2dmask_from_bbox(bbox, intrinsics[0], c2w[0], H, W) > 0.).view(B, -1)
 
         # N_rays=-1 for rendering full image
-        # todo bbox based sampling to make volume rendering fast
-        rays_o, rays_d, select_inds = rend_util.get_rays(
-            c2w, intrinsics, H, W, N_rays=-1, mask=mask)
+        if render_kwargs_test['strict_bbox_sampling']:
+            # N_rays=-1 for rendering full image,
+            rays_o, rays_d, select_inds, near, far = \
+                rend_util.get_rays_nb(c2w, intrinsics, H, W, bbox, -1, mask=mask)
+        else:
+            rays_o, rays_d, select_inds = rend_util.get_rays(
+                c2w, intrinsics, H, W, N_rays=-1, mask=mask)
+            near, far = None, None
+
+
         target_rgb = val_gt['rgb'].to(device)
         target_segm = val_gt['segm'].to(device)
         cos_anneal_ratio = get_cos_anneal_ratio(it, args.training.anneal_end) if args.training.anneal_end > 0. else -1.0
@@ -215,6 +258,8 @@ class Trainer(nn.Module):
                                           smpl_param=smplparams,
                                           bounding_box=bbox.to(device) if args.training.get('sample_maskonly',False) is not False else None,
                                           cos_anneal_ratio=cos_anneal_ratio,
+                                          near=near,
+                                          far=far,
                                           **render_kwargs_test)
 
         to_img = functools.partial(

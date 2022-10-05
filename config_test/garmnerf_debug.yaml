@@ -1,5 +1,5 @@
-expname: garmnerf_debug #garmnerf_debug #garmnerf_masksegm_exp_p_a_dirproj_mine
-desc: "To compare cos_anneal sampling with sphere init"
+expname: garmnerf_debug_cosanneal_nbbox #garmnerf_debug #garmnerf_masksegm_exp_p_a_dirproj_mine
+desc: "Cosannealing + Neuralbody style bounding box"
 # device_ids: [0]     # single gpu           ; run on specified GPU
 # device_ids: [1, 0]  # DP                   ; run on specified GPU
 device_ids: -1        # single GPU / DP / DDP; run on all available GPUs;
@@ -15,7 +15,7 @@ data:
   test_views: [1, 3, 9] #Sanity check
   downscale: 1        # downscale image for training
   pin_memory: True
-#  num_workers: 8
+  num_workers: 8
   N_rays: 768 #512          # 512 N_rays for training
   val_rayschunk: 2048 #2048  # 2048 N_rays for validation
   val_downscale: 1     # downscale image for validation
@@ -41,6 +41,9 @@ model:
   use_cbfeat: False
   use_idfeat: False
   use_segm : True
+
+  enlarge_box: 0.05
+  strict_bbox_sampling: True # NB Style
   decoder:
 #    input_ch: 5 # uv / x-p
 #    input_ch: 3 # uv / x-p

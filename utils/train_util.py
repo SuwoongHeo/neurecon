@@ -60,20 +60,22 @@ def batchify_query(query_fn, *args: Iterable[torch.Tensor], chunk, dim_batchify,
                 # tmp_dict[k] = torch.cat(tmp_dict[k], dim=dim_batchify).unflatten(dim_batchify, [_N_rays, _N_pts])
                 # NOTE: compatible with torch 1.6
                 v = torch.cat(tmp_dict[k], dim=dim_batchify)
-                tmp_dict[k] = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]])
+                tmp_dict[k] = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]]) if v.shape[0]>0 else v
             entry = tmp_dict
         elif isinstance(entry[0], tuple):
             tmp_list = []
             for entry_item in entry[0]:
                 v = torch.cat([entry_item], dim=dim_batchify) #todo check
-                tmp_list.append(v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]]))
+                # For zero-sized tensor
+                v_ = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify + 1:]]) if v.shape[0]>0 else v
+                tmp_list.append(v_)
             entry = tuple(tmp_list)
         elif isinstance(entry[0], torch.Tensor):
             # [(B), N_rays*N_pts, ...] -> [(B), N_rays, N_pts, ...]
             # entry = torch.cat(entry, dim=dim_batchify).unflatten(dim_batchify, [_N_rays, _N_pts])
             # NOTE: compatible with torch 1.6
             v = torch.cat(entry, dim=dim_batchify)
-            entry = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]])
+            entry = v.reshape([*v.shape[:dim_batchify], _N_rays, _N_pts, *v.shape[dim_batchify+1:]]) if v.shape[0]>0 else v
         collate_raw_ret.append(entry)
         num_entry += 1
     if num_entry == 1:

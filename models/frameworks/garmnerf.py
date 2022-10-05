@@ -317,37 +317,19 @@ class GarmentNerf(nn.Module):
         sdf, nablas, feats, h = forward_with_nablas(func, x)
         return sdf, nablas, feats, h
 
-    def forward_radiance(self, x: torch.Tensor, view_dirs: torch.Tensor,
-                         cbfeat: torch.Tensor, idGfeat: torch.Tensor, idCfeat: torch.Tensor, idSfeat: torch.Tensor,
-                         smpl_param: torch.Tensor
-                         ):
+    def forward_radiance(self, x_: torch.Tensor, view_dirs: torch.Tensor, nablas: torch.Tensor, intmed_feat: torch.Tensor):
         """
-        :param x : xyz points, [B, N_ryas, N_pts, 3]
-        :param view_dirs : uv point and distance [B, N_ryas, N_pts, 3]
-        :param cbfeat : canonical body uvmap feature, [B, ch, H, W]
-        :param idGfeat : identity uvmap feature, [B, self.W_idG_feat, H, W]
-        :param idCfeat : identity uvmap feature, [B, self.W_idC_feat, H, W]
         """
-        _, nablas, feats, intmed_feat = self.forward_sdf_with_nablas(x,
-                                                                     cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
-                                                                     smpl_param=smpl_param)
-        # todo rename uvh
-        # feats[-3] : idCfeat_, feates[-1]: uvh
-        x_ = torch.cat([feats[-3], feats[-1]], dim=-1)  # concat with color identity feature, uvh
+        # x_ = torch.cat([feats[-3], feats[-1]], dim=-1)  # concat with color identity feature, uvh
         radiances = self.decoder.radiance_net.forward(x_, view_dirs, nablas, intmed_feat)
+
         return radiances
 
-    def forward_segm(self, x: torch.Tensor, view_dirs: torch.Tensor,
-                     cbfeat: torch.Tensor, idGfeat: torch.Tensor, idCfeat: torch.Tensor, idSfeat: torch.Tensor,
-                     smpl_param: torch.Tensor
-                     ):
-        _, feats, intmed_feat = self.forward_sdf(x, cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
-                                                   smpl_param=smpl_param,
-                                                   return_h=True)
+    def forward_segm(self, x_: torch.Tensor, view_dirs: torch.Tensor, intmed_feat: torch.Tensor):
         # feats[-2] : idSfeat_, feates[-1]: uvh
-        x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with color identity feature, uvh
-        logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs,
-                                               intmed_feat)  # Note. second, third input will not be used
+        # x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with segment identity feature, uvh
+        logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs, intmed_feat)
+
         return logits
 
     def forward(self, x: torch.Tensor, view_dirs: torch.Tensor,
@@ -365,9 +347,9 @@ class GarmentNerf(nn.Module):
                                                                        idCfeat=idCfeat, idSfeat=idSfeat,
                                                                        smpl_param=smpl_param)
         x_ = torch.cat([feats[-3], feats[-1]], dim=-1)  # concat with color identity feature, uvh
-        radiances = self.decoder.radiance_net.forward(x_, view_dirs, nablas, intmed_feat) if compute_radiance else None
+        radiances = self.forward_radiance(x_, view_dirs, nablas, intmed_feat) if compute_radiance else None
         x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with segment identity feature, uvh
-        logits = self.decoder.segm_net.forward(x_, view_dirs, view_dirs, intmed_feat) if compute_logit else None
+        logits = self.forward_segm(x_, view_dirs, intmed_feat) if compute_logit else None
 
         return radiances, sdf, nablas, logits
 
@@ -514,7 +496,9 @@ def get_model(args):
         'batched': args.data.batch_size is not None,
         'perturb': args.model.setdefault('perturb', True),  # config whether do stratified sampling
         'white_bkgd': args.model.setdefault('white_bkgd', False),
-        'idfeat_map_all': idfeat_map
+        'idfeat_map_all': idfeat_map,
+        'enlarge_box': args.model.setdefault('enlarge_box', 0.005),
+        'strict_bbox_sampling': args.model.setdefault('strict_bbox_sampling', False),
     }
     render_kwargs_test = copy.deepcopy(render_kwargs_train)
     render_kwargs_test['idfeat_map_all'] = idfeat_map

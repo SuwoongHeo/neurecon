@@ -63,6 +63,8 @@ def volume_render(
         smpl_param=None,
         bounding_box=None,
         cos_anneal_ratio=-1.0, #swheo : Just as in original author's impl
+        near=None, # To apply neuralbody style sampling
+        far=None,
         **dummy_kwargs  # just place holder
 ):
     """
@@ -90,16 +92,22 @@ def volume_render(
     # ---------------
     # Render a ray chunk
     # ---------------
-    def render_rayschunk(rays_o: torch.Tensor, rays_d: torch.Tensor):
+    def render_rayschunk(rays_o: torch.Tensor, rays_d: torch.Tensor, near: torch.Tensor=None, far: torch.Tensor=None):
         # rays_o: [(B), N_rays, 3]
         # rays_d: [(B), N_rays, 3]
 
         # [(B), N_rays] x 2
-        if bounding_box is None: #todo use this if near far are not provided given near far if
-            near, far = rend_util.near_far_from_sphere(rays_o, rays_d, r=obj_bounding_radius)
-        else:
-            near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)
-            assert torch.all(valididx).item(), "Some rays are outside bounding box"
+        if (near is None) and (far is None):
+            if bounding_box is None:
+                near, far = rend_util.near_far_from_sphere(rays_o, rays_d, r=obj_bounding_radius)
+            else:
+                near, far, valididx = rend_util.near_far_from_bbox(rays_o, rays_d, bounding_box)
+                assert torch.all(valididx).item(), "Some rays are outside bounding box"
+
+            if near_bypass is not None:
+                near = near_bypass * torch.ones_like(near).to(device)
+            if far_bypass is not None:
+                far = far_bypass * torch.ones_like(far).to(device)
 
         if near_bypass is not None:
             near = near_bypass * torch.ones_like(near).to(device)
@@ -242,9 +250,12 @@ def volume_render(
         # ------------------
         # Inside Scene
         # ------------------
-        _, sdf, nablas, _ = batchify_query(model.forward, pts, view_dirs=None, cbfeat=cbfeat, idGfeat=idGfeat,
-                                           idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param,
-                                           compute_radiance=False, compute_logit=False)
+        # _, sdf, nablas, _ = batchify_query(model.forward, pts, view_dirs=None, cbfeat=cbfeat, idGfeat=idGfeat,
+        #                                    idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param,
+        #                                    compute_radiance=False, compute_logit=False)
+        sdf, nablas, feats, intmed_feat = batchify_query(model.forward_sdf_with_nablas, pts, cbfeat=cbfeat, idGfeat=idGfeat,
+                                           idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
+
         if cos_anneal_ratio >= 0.0:
             # https://github.com/Totoro97/NeuS/blob/6f96f96005d72a7a358379d2b576c496a1ab68dd/models/renderer.py#L230
             # It prevent the back-facing point to be in part of rendering
@@ -270,11 +281,28 @@ def volume_render(
         # cdf, opacity_alpha = sdf_to_alpha(sdf, model.decoder.forward_s())
         cdf, opacity_alpha = sdf_to_alpha(prev_sdf=prev_sdf, next_sdf=next_sdf, s=model.decoder.forward_s())
         # radiances = model.forward_radiance(pts_mid, view_dirs_mid)
+        if cos_anneal_ratio >= 0.0:
+            x_ = torch.cat([feats[-3], feats[-1]], dim=-1)  # concat with color identity feature, uvh
+            radiances = batchify_query(model.forward_radiance, x_,
+                                                     view_dirs.unsqueeze(-2).expand_as(
+                                                         pts_mid) if use_view_dirs else None,
+                                                     nablas,
+                                                     intmed_feat)
+            x_ = torch.cat([feats[-2], feats[-1]], dim=-1)  # concat with segment identity feature, uvh
+            logits = batchify_query(model.forward_segm, x_,
+                                                     view_dirs.unsqueeze(-2).expand_as(
+                                                         pts_mid) if use_view_dirs else None,
+                                                     intmed_feat)
+        else:
+            radiances, _, _, logits = batchify_query(model.forward, pts_mid,
+                                                     view_dirs.unsqueeze(-2).expand_as(
+                                                         pts_mid) if use_view_dirs else None,
+                                                     cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat,
+                                                     smpl_param=smpl_param,
+                                                     compute_radiance=True,
+                                                     compute_logit=True if model.decoder.segm_net is not None else False)
 
-        radiances, _, _, logits = batchify_query(model.forward, pts_mid,
-                                   view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
-                                   cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param,
-                                   compute_radiance=True, compute_logit=True if model.decoder.segm_net is not None else False)
+
         # radiances = batchify_query(model.forward_radiance, pts_mid,
         #                            view_dirs.unsqueeze(-2).expand_as(pts_mid) if use_view_dirs else None,
         #                            cbfeat=cbfeat, idGfeat=idGfeat, idCfeat=idCfeat, idSfeat=idSfeat, smpl_param=smpl_param)
@@ -394,10 +422,18 @@ def volume_render(
 
     ret = {}
     for i in tqdm(range(0, rays_d.shape[DIM_BATCHIFY], rayschunk), disable=not show_progress):
-        ret_i = render_rayschunk(
-            rays_o[:, i:i + rayschunk] if batched else rays_o[i:i + rayschunk],
-            rays_d[:, i:i + rayschunk] if batched else rays_d[i:i + rayschunk]
-        )
+        if (near is None) and (far is None):
+            ret_i = render_rayschunk(
+                rays_o[:, i:i + rayschunk] if batched else rays_o[i:i + rayschunk],
+                rays_d[:, i:i + rayschunk] if batched else rays_d[i:i + rayschunk],
+            )
+        else:
+            ret_i = render_rayschunk(
+                rays_o[:, i:i + rayschunk] if batched else rays_o[i:i + rayschunk],
+                rays_d[:, i:i + rayschunk] if batched else rays_d[i:i + rayschunk],
+                near[:, i:i + rayschunk] if batched else near[i:i + rayschunk],
+                far[:, i:i + rayschunk] if batched else far[i:i + rayschunk],
+            )
         for k, v in ret_i.items():
             if k not in ret:
                 ret[k] = []
